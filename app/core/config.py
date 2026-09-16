@@ -2,7 +2,7 @@ import os
 import json
 from pydantic_settings import BaseSettings
 
-_DB_URL_DEFAULT = "postgresql://gamalalmaqtary:xndaLTpmEnsMY5cyBwXyX5sRRup8ooAD@dpg-dak2e10jo6nc73b85au0-a.oregon-postgres.render.com/gamal_solutions_ai_agent_db_h3bk"
+_DB_URL_DEFAULT = "postgresql://gamalalmaqtary:MK3mY9gfJ9FJ5NQOFkgURWm6gLTr3mEU@dpg-dal1pbdbedkc73aue77g-a.virginia-postgres.render.com/ardhiya_keywords_tracking_db"
 _SECRET_KEY_DEFAULT = "gamal-solutions-enterprise-secret-key-2024-super-secure-jwt"
 
 
