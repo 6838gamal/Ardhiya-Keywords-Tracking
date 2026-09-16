@@ -1,0 +1,1714 @@
+{% extends "base.html" %}
+
+{% block title %}تيليجرام — منصة جمال{% endblock %}
+
+{% block page_title %}تكامل تيليجرام{% endblock %}
+{% block page_subtitle %}إدارة الاتصال واستقبال البيانات والتحليل والرد{% endblock %}
+
+{% block head %}
+<style>
+  .tg-tab { cursor:pointer; padding:.5rem 1.25rem; border-radius:.75rem; font-size:.875rem; font-weight:600; color:#64748b; transition:all .15s; }
+  .tg-tab.active { background:#2563eb; color:#fff; box-shadow:0 2px 8px rgba(37,99,235,.3); }
+  .tg-tab:hover:not(.active) { background:#f1f5f9; color:#1e40af; }
+  .tg-panel { display:none; }
+  .tg-panel.active { display:block; }
+  .msg-card { background:#fff; border:1px solid #e2e8f0; border-radius:1rem; padding:1rem; margin-bottom:.75rem; transition:box-shadow .15s; }
+  .msg-card:hover { box-shadow:0 4px 12px rgba(0,0,0,.08); }
+  .msg-card.unread { border-right:3px solid #2563eb; }
+  .badge-incoming { background:#dbeafe; color:#1e40af; }
+  .badge-outgoing { background:#d1fae5; color:#065f46; }
+  .sentiment-positive { background:#d1fae5; color:#065f46; }
+  .sentiment-negative { background:#fee2e2; color:#991b1b; }
+  .sentiment-neutral { background:#f1f5f9; color:#475569; }
+  .status-dot { width:10px; height:10px; border-radius:50%; display:inline-block; }
+  .status-connected { background:#22c55e; box-shadow:0 0 0 3px rgba(34,197,94,.2); }
+  .status-disconnected { background:#94a3b8; }
+  .status-pending { background:#f59e0b; animation: pulse 1.5s infinite; }
+  .status-error { background:#ef4444; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+  .rule-card { background:#fff; border:1px solid #e2e8f0; border-radius:1rem; padding:1rem; margin-bottom:.75rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div x-data="telegramApp()" x-init="init()">
+
+  <!-- Connection Status Bar -->
+  <div class="bg-white rounded-2xl border border-slate-200 p-4 mb-6 flex flex-wrap items-center gap-4">
+    <div class="flex items-center gap-3">
+      <span class="status-dot" :class="{
+        'status-connected': status === 'connected',
+        'status-disconnected': status === 'disconnected',
+        'status-pending': status === 'pending_code',
+        'status-error': status === 'error'
+      }"></span>
+      <div>
+        <div class="font-bold text-slate-800 text-sm" x-text="statusLabel()"></div>
+        <div class="text-xs text-slate-500" x-text="accountInfo"></div>
+      </div>
+    </div>
+    <div class="flex items-center gap-2 mr-auto flex-wrap">
+      <!-- Connection checking indicator -->
+      <template x-if="connectionChecking">
+        <span class="inline-flex items-center gap-1.5 text-xs text-slate-500 bg-slate-100 border border-slate-200 rounded-full px-2.5 py-1">
+          <svg class="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+          فحص الاتصال...
+        </span>
+      </template>
+      <!-- Auto-sync indicator -->
+      <template x-if="status === 'connected'">
+        <div class="flex items-center gap-1.5 text-xs bg-slate-50 px-2.5 py-1.5 rounded-lg border border-slate-100">
+          <!-- syncing spinner -->
+          <template x-if="autoSyncing">
+            <span class="inline-flex items-center gap-1.5 text-blue-600">
+              <svg class="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+              جاري المزامنة مع تيليجرام...
+            </span>
+          </template>
+          <!-- idle -->
+          <template x-if="!autoSyncing">
+            <span class="inline-flex items-center gap-1.5 text-slate-400">
+              <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse inline-block"></span>
+              مزامنة تلقائية كل 30 ث
+            </span>
+          </template>
+          <template x-if="lastSyncTime">
+            <span class="text-slate-500 font-medium border-r border-slate-200 pr-2 mr-0.5" x-text="'آخر مزامنة: ' + lastSyncTime"></span>
+          </template>
+        </div>
+      </template>
+      <template x-if="status === 'connected'">
+        <div class="flex gap-2">
+          <button @click="syncMessages()" class="btn-primary text-xs py-1.5 px-3" :disabled="syncing">
+            <svg class="w-4 h-4" :class="{'animate-spin': syncing}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+            <span x-text="syncing ? 'جاري الجلب...' : 'جلب الرسائل'"></span>
+          </button>
+          <button @click="analyzeMessages()" class="btn-secondary text-xs py-1.5 px-3">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+            تحليل
+          </button>
+          <button @click="disconnect()" class="btn-danger text-xs py-1.5 px-3">قطع الاتصال</button>
+        </div>
+      </template>
+    </div>
+    <!-- Toast -->
+    <template x-if="toast">
+      <div class="w-full mt-2 px-4 py-2.5 rounded-xl text-sm font-medium"
+           :class="toastType === 'success' ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'"
+           x-text="toast"></div>
+    </template>
+  </div>
+
+  <!-- Tabs -->
+  <div class="flex gap-2 mb-6 flex-wrap">
+    <button class="tg-tab" :class="{ active: tab === 'settings' }" @click="tab='settings'">
+      ⚙️ الإعدادات والاتصال
+    </button>
+    <button class="tg-tab" :class="{ active: tab === 'messages' }" @click="tab='messages'">
+      📨 استقبال البيانات
+      <template x-if="unreadCount > 0">
+        <span class="mr-1 bg-red-500 text-white text-xs rounded-full px-1.5 py-0.5" x-text="unreadCount"></span>
+      </template>
+    </button>
+    <button class="tg-tab" :class="{ active: tab === 'analysis' }" @click="tab='analysis'">
+      📊 التحليل
+    </button>
+    <button class="tg-tab" :class="{ active: tab === 'rules' }" @click="tab='rules'">
+      🤖 تغذية الوكيل والرد
+    </button>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <!-- TAB 1: SETTINGS — Step wizard -->
+  <!-- ══════════════════════════════════════════════════════ -->
+  <div x-show="tab === 'settings'">
+
+    <!-- CONNECTED STATE -->
+    <template x-if="status === 'connected'">
+      <div class="max-w-xl mx-auto space-y-4">
+
+        <!-- Main connected card -->
+        <div class="bg-white rounded-2xl border border-green-200 shadow-sm overflow-hidden">
+          <div class="bg-gradient-to-l from-green-50 to-emerald-50 px-6 py-5 flex items-center gap-4 border-b border-green-100">
+            <div class="w-14 h-14 bg-green-500 rounded-full flex items-center justify-center flex-shrink-0 shadow">
+              <svg class="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+            </div>
+            <div>
+              <h3 class="font-black text-slate-800 text-lg" x-text="'مرحباً، ' + accountInfo"></h3>
+              <p class="text-green-700 text-sm font-medium">✅ الحساب متصل ويعمل بشكل صحيح</p>
+            </div>
+          </div>
+          <div class="px-6 py-4 space-y-3">
+            <div class="flex justify-between items-center py-2 border-b border-slate-50">
+              <span class="text-slate-500 text-sm flex items-center gap-1.5">
+                <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"/></svg>
+                حفظ الجلسة
+              </span>
+              <span class="badge badge-green text-xs">محفوظة في قاعدة البيانات ✓</span>
+            </div>
+            <div class="flex justify-between items-center py-2 border-b border-slate-50">
+              <span class="text-slate-500 text-sm">تستمر الجلسة بعد إعادة التشغيل؟</span>
+              <span class="text-green-700 font-bold text-sm">نعم — تلقائياً</span>
+            </div>
+            <div class="flex justify-between items-center py-2">
+              <span class="text-slate-500 text-sm">الرسائل المستوردة</span>
+              <span class="font-bold text-blue-600" x-text="totalMessages + ' رسالة'"></span>
+            </div>
+          </div>
+          <div class="px-6 pb-5 flex flex-wrap gap-3">
+            <button @click="tab='messages'; syncMessages()" class="btn-primary flex-1 justify-center">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+              جلب الرسائل
+            </button>
+            <button @click="validateSession()" class="btn-secondary flex-1 justify-center" :disabled="validating">
+              <svg class="w-4 h-4" :class="{'animate-spin': validating}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+              <span x-text="validating ? 'جاري التحقق...' : 'التحقق من الجلسة'"></span>
+            </button>
+            <button @click="disconnect()" class="btn-danger">قطع</button>
+          </div>
+        </div>
+
+        <!-- Session persistence info box -->
+        <div class="bg-blue-50 border border-blue-200 rounded-2xl p-4">
+          <div class="flex gap-3 items-start">
+            <div class="text-blue-500 flex-shrink-0 mt-0.5">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            </div>
+            <div class="text-sm text-blue-800 space-y-1">
+              <p class="font-bold">كيف تعمل الجلسة؟</p>
+              <p>• الجلسة محفوظة بشكل دائم في قاعدة البيانات وتبقى عبر إعادة التشغيل</p>
+              <p>• عند كل تشغيل للتطبيق يتم التحقق تلقائياً من صلاحيتها</p>
+              <p>• لن تحتاج لتسجيل الدخول من جديد ما لم تنهِ جلستك من تيليجرام</p>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </template>
+
+    <!-- SETUP WIZARD (not connected) -->
+    <template x-if="status !== 'connected'">
+      <div class="max-w-2xl mx-auto">
+
+        <!-- Step indicators -->
+        <div class="flex items-center gap-0 mb-8">
+          <!-- Step 1 -->
+          <div class="flex items-center gap-2 flex-1">
+            <div class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold flex-shrink-0"
+                 :class="status === 'disconnected' || status === 'error' ? 'bg-blue-600 text-white' : 'bg-green-500 text-white'">
+              <span x-show="status === 'disconnected' || status === 'error'">1</span>
+              <svg x-show="status !== 'disconnected' && status !== 'error'" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
+            </div>
+            <span class="text-sm font-semibold" :class="status === 'disconnected' || status === 'error' ? 'text-blue-700' : 'text-green-700'">بيانات API والهاتف</span>
+          </div>
+          <div class="flex-1 h-0.5 mx-2" :class="status === 'pending_code' ? 'bg-blue-400' : 'bg-slate-200'"></div>
+          <!-- Step 2 -->
+          <div class="flex items-center gap-2 flex-1 justify-end">
+            <div class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold flex-shrink-0"
+                 :class="status === 'pending_code' ? 'bg-blue-600 text-white animate-pulse' : 'bg-slate-200 text-slate-400'">2</div>
+            <span class="text-sm font-semibold" :class="status === 'pending_code' ? 'text-blue-700' : 'text-slate-400'">رمز التحقق</span>
+          </div>
+        </div>
+
+        <!-- ── STEP 1: API credentials ── -->
+        <div x-show="status === 'disconnected' || status === 'error'"
+             class="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
+          <div class="flex items-center gap-3 mb-5">
+            <div class="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center">
+              <svg class="w-5 h-5 text-blue-600" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.894 8.221-1.97 9.28c-.145.658-.537.818-1.084.508l-3-2.21-1.447 1.394c-.16.16-.295.295-.605.295l.213-3.053 5.56-5.023c.242-.213-.054-.333-.373-.12L7.26 13.825l-2.96-.924c-.643-.204-.657-.643.136-.953l11.57-4.461c.537-.194 1.006.131.888.734z"/></svg>
+            </div>
+            <div>
+              <h3 class="font-bold text-slate-800">الخطوة الأولى — ربط حسابك</h3>
+              <p class="text-slate-500 text-xs">احصل على البيانات من <a href="https://my.telegram.org/apps" target="_blank" class="text-blue-600 underline font-medium">my.telegram.org/apps</a></p>
+            </div>
+          </div>
+
+          <template x-if="status === 'error'">
+            <div class="bg-red-50 border border-red-200 rounded-xl p-3 mb-4 text-sm text-red-700 font-medium">⚠️ حدث خطأ في الاتصال — تحقق من البيانات وأعد المحاولة</div>
+          </template>
+
+          <form @submit.prevent="requestCode()" class="space-y-4">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label class="block text-sm font-semibold text-slate-700 mb-1.5">API ID <span class="text-red-500">*</span></label>
+                <input x-model="form.api_id" type="text" placeholder="مثال: 12345678" class="form-input" required />
+              </div>
+              <div>
+                <label class="block text-sm font-semibold text-slate-700 mb-1.5">API Hash <span class="text-red-500">*</span></label>
+                <input x-model="form.api_hash" type="password" placeholder="الـ Hash السري" class="form-input" required />
+              </div>
+            </div>
+            <div>
+              <label class="block text-sm font-semibold text-slate-700 mb-1.5">رقم الهاتف (مع كود الدولة) <span class="text-red-500">*</span></label>
+              <input x-model="form.phone" type="tel" placeholder="مثال: +966501234567 أو +20123456789" class="form-input" dir="ltr" required />
+              <p class="text-xs text-slate-400 mt-1">سيتم إرسال رمز التحقق إلى تيليجرام على هذا الرقم</p>
+            </div>
+            <button type="submit" class="btn-primary w-full justify-center py-3 text-base" :disabled="requesting">
+              <svg class="w-5 h-5" :class="{'animate-spin': requesting}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/>
+              </svg>
+              <span x-text="requesting ? 'جاري إرسال الرمز...' : 'إرسال رمز التحقق إلى تيليجرام'"></span>
+            </button>
+          </form>
+        </div>
+
+        <!-- ── STEP 2: Verification code ── -->
+        <div x-show="status === 'pending_code'"
+             class="bg-white rounded-2xl border-2 border-blue-300 p-6 shadow-lg">
+          <!-- Animated notification -->
+          <div class="bg-amber-50 border border-amber-300 rounded-xl p-4 mb-6 flex items-start gap-3">
+            <div class="text-2xl flex-shrink-0">📱</div>
+            <div>
+              <p class="text-amber-900 font-bold text-sm">تم إرسال رمز التحقق!</p>
+              <p class="text-amber-700 text-xs mt-0.5">افتح تطبيق تيليجرام على هاتفك وستجد رسالة برمز مكوّن من 5 أرقام، أو أدخل الرمز الذي وصل عبر SMS</p>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-3 mb-5">
+            <div class="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center">
+              <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+            </div>
+            <div>
+              <h3 class="font-bold text-slate-800">الخطوة الثانية — أدخل رمز التحقق</h3>
+              <p class="text-slate-500 text-xs" x-text="'الرقم: ' + (form.phone || '...')"></p>
+            </div>
+          </div>
+
+          <form @submit.prevent="verifyCode()" class="space-y-4">
+            <div>
+              <label class="block text-sm font-semibold text-slate-700 mb-2">رمز التحقق</label>
+              <!-- Large prominent code input -->
+              <input x-model="form.code"
+                     x-ref="codeInput"
+                     type="text"
+                     inputmode="numeric"
+                     pattern="[0-9\s]*"
+                     placeholder="- - - - -"
+                     class="form-input text-center font-mono text-3xl tracking-[1rem] h-16 border-2 border-blue-300 focus:border-blue-500"
+                     maxlength="10"
+                     autocomplete="one-time-code"
+                     required />
+              <p class="text-center text-xs text-slate-400 mt-2">أدخل الرمز المكون من 5 أرقام الذي وصلك في تيليجرام</p>
+            </div>
+            <button type="submit" class="btn-primary w-full justify-center py-3 text-base" :disabled="verifying">
+              <svg class="w-5 h-5" :class="{'animate-spin': verifying}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              <span x-text="verifying ? 'جاري التحقق والاتصال...' : 'تأكيد الرمز والدخول'"></span>
+            </button>
+            <button type="button" @click="status='disconnected'; form.code=''"
+                    class="btn-secondary w-full justify-center text-sm">
+              ↩ العودة وتغيير رقم الهاتف
+            </button>
+          </form>
+        </div>
+
+      </div>
+    </template>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <!-- TAB 2: MESSAGES / DATA RECEPTION -->
+  <!-- ══════════════════════════════════════════════════════ -->
+  <div x-show="tab === 'messages'">
+    <!-- Filters -->
+    <div class="bg-white rounded-2xl border border-slate-200 p-4 mb-4 flex flex-wrap gap-3 items-center">
+      <input x-model="msgFilter" type="text" placeholder="بحث في الرسائل..." class="form-input max-w-xs" />
+      <select x-model="msgDirectionFilter" class="form-input max-w-xs">
+        <option value="">كل الرسائل</option>
+        <option value="incoming">واردة</option>
+        <option value="outgoing">صادرة</option>
+      </select>
+      <select x-model="msgReadFilter" class="form-input max-w-xs">
+        <option value="">كل الحالات</option>
+        <option value="unread">غير مقروءة</option>
+        <option value="read">مقروءة</option>
+      </select>
+      <div class="mr-auto text-sm text-slate-500">
+        <span x-text="filteredMessages.length"></span> رسالة
+      </div>
+    </div>
+
+    <!-- Messages List -->
+    <template x-if="filteredMessages.length === 0">
+      <div class="bg-white rounded-2xl border border-slate-200 p-12 text-center text-slate-400">
+        <svg class="w-16 h-16 mx-auto mb-4 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"/></svg>
+        <p class="text-lg font-medium mb-1">لا توجد رسائل</p>
+        <p class="text-sm">اتصل بتيليجرام واضغط "جلب الرسائل" لاستيرادها</p>
+      </div>
+    </template>
+
+    <template x-for="msg in filteredMessages" :key="msg.id">
+      <div class="msg-card" :class="{ 'unread': !msg.is_read }">
+        <div class="flex items-start gap-3">
+          <!-- Avatar -->
+          <div class="w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 text-white font-bold text-sm"
+               :style="'background:' + stringToColor(msg.sender_name)">
+            <span x-text="(msg.sender_name || '?')[0]"></span>
+          </div>
+          <!-- Content -->
+          <div class="flex-1 min-w-0">
+            <div class="flex flex-wrap items-center gap-2 mb-1">
+              <span class="font-bold text-slate-800 text-sm" x-text="msg.sender_name || 'مجهول'"></span>
+              <template x-if="msg.sender_username">
+                <span class="text-xs text-slate-400" x-text="'@' + msg.sender_username"></span>
+              </template>
+              <span class="badge text-xs" :class="msg.direction === 'incoming' ? 'badge-incoming' : 'badge-outgoing'"
+                    x-text="msg.direction === 'incoming' ? '⬇ وارد' : '⬆ صادر'"></span>
+              <template x-if="msg.reply_sent">
+                <span class="badge badge-green text-xs">✓ تم الرد</span>
+              </template>
+              <template x-if="!msg.is_read && msg.direction === 'incoming'">
+                <span class="badge badge-blue text-xs">جديد</span>
+              </template>
+            </div>
+            <div class="flex items-center gap-2 text-xs text-slate-400 mb-2">
+              <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8h2a2 2 0 012 2v6a2 2 0 01-2 2h-2v4l-4-4H9a1.994 1.994 0 01-1.414-.586m0 0L11 14h4a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2v4l.586-.586z"/></svg>
+              <span x-text="msg.chat_title || msg.chat_id"></span>
+              <span>•</span>
+              <span x-text="formatDate(msg.received_at)"></span>
+            </div>
+            <p class="text-slate-700 text-sm leading-relaxed bg-slate-50 rounded-lg px-3 py-2" x-text="msg.content"></p>
+
+            <!-- Analysis badge -->
+            <template x-if="msg.is_analyzed && msg.analysis_result">
+              <div class="flex flex-wrap gap-2 mt-2">
+                <span class="badge text-xs"
+                      :class="msg.analysis_result.sentiment === 'إيجابي' ? 'sentiment-positive' : msg.analysis_result.sentiment === 'سلبي' ? 'sentiment-negative' : 'sentiment-neutral'"
+                      x-text="'المشاعر: ' + msg.analysis_result.sentiment"></span>
+                <span class="badge badge-blue text-xs" x-text="'النية: ' + msg.analysis_result.intent"></span>
+                <template x-if="msg.analysis_result.priority === 'عالي'">
+                  <span class="badge badge-red text-xs">⚡ أولوية عالية</span>
+                </template>
+                <template x-if="msg.analysis_result.signal_type && msg.analysis_result.signal_type !== 'مؤشر عام'">
+                  <span class="text-xs px-2 py-0.5 rounded-full font-semibold"
+                        :class="{
+                          'bg-emerald-100 text-emerald-700': msg.analysis_result.signal_color === 'emerald',
+                          'bg-blue-100 text-blue-700': msg.analysis_result.signal_color === 'blue',
+                          'bg-red-100 text-red-700': msg.analysis_result.signal_color === 'red',
+                          'bg-purple-100 text-purple-700': msg.analysis_result.signal_color === 'purple',
+                          'bg-orange-100 text-orange-700': msg.analysis_result.signal_color === 'orange',
+                          'bg-slate-100 text-slate-600': !msg.analysis_result.signal_color || msg.analysis_result.signal_color === 'slate',
+                        }"
+                        x-text="msg.analysis_result.signal_type"></span>
+                </template>
+              </div>
+            </template>
+          </div>
+
+          <!-- Actions -->
+          <div class="flex flex-col gap-1.5 flex-shrink-0">
+            <button @click="openReplyModal(msg)"
+                    class="text-xs bg-blue-50 text-blue-700 hover:bg-blue-100 px-2.5 py-1.5 rounded-lg font-medium transition-colors"
+                    :disabled="msg.direction !== 'incoming'">
+              رد
+            </button>
+            <button @click="markRead(msg)"
+                    x-show="!msg.is_read && msg.direction === 'incoming'"
+                    class="text-xs bg-slate-100 text-slate-600 hover:bg-slate-200 px-2.5 py-1.5 rounded-lg font-medium transition-colors">
+              قراءة
+            </button>
+          </div>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <!-- TAB 3: DEEP MARKET INTELLIGENCE -->
+  <!-- ══════════════════════════════════════════════════════ -->
+  <div x-show="tab === 'analysis'">
+
+    <!-- Action bar -->
+    <div class="flex flex-wrap items-center justify-between gap-3 mb-6">
+      <div>
+        <h2 class="font-black text-slate-800 text-lg">🧠 ذكاء السوق العميق</h2>
+        <div class="flex items-center gap-3 mt-0.5 flex-wrap">
+          <p class="text-slate-500 text-sm" x-text="marketReport ? 'آخر تحليل: ' + (marketReport.generated_at ? marketReport.generated_at.slice(0,10) : '—') : 'لم يتم التحليل بعد'"></p>
+          <!-- Auto-update live indicator -->
+          <template x-if="autoAnalyzing">
+            <span class="inline-flex items-center gap-1.5 text-xs text-blue-600 bg-blue-50 border border-blue-100 rounded-full px-2.5 py-1 font-medium">
+              <span class="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
+              جاري التحديث التلقائي...
+            </span>
+          </template>
+          <template x-if="!autoAnalyzing && lastAutoUpdate">
+            <span class="inline-flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-full px-2.5 py-1 font-medium">
+              <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+              تحديث تلقائي — آخر تحديث: <span x-text="lastAutoUpdate"></span>
+            </span>
+          </template>
+          <!-- Auto toggle -->
+          <label class="inline-flex items-center gap-2 cursor-pointer select-none" title="تشغيل/إيقاف التحديث التلقائي">
+            <span class="text-xs text-slate-500">تلقائي</span>
+            <div class="relative">
+              <input type="checkbox" class="sr-only peer" x-model="autoAnalysisEnabled">
+              <div class="w-9 h-5 bg-slate-200 peer-checked:bg-blue-500 rounded-full transition-colors"></div>
+              <div class="absolute top-0.5 start-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform peer-checked:translate-x-4 rtl:peer-checked:-translate-x-4"></div>
+            </div>
+          </label>
+        </div>
+      </div>
+      <div class="flex gap-2">
+        <button @click="runMarketAnalysis()" :disabled="analyzingMarket || autoAnalyzing"
+                class="btn-primary" :class="{'opacity-70': analyzingMarket || autoAnalyzing}">
+          <svg class="w-4 h-4" :class="{'animate-spin': analyzingMarket}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.347.346A3.975 3.975 0 0112 16a3.975 3.975 0 01-2.828-1.172l-.347-.347z"/>
+          </svg>
+          <span x-text="analyzingMarket ? 'جاري التحليل...' : '🔍 تحليل الآن'"></span>
+        </button>
+        <a href="/analytics" class="btn-secondary">عرض في التحليلات ↗</a>
+      </div>
+    </div>
+
+    <!-- No data state -->
+    <template x-if="!marketReport">
+      <div class="bg-white rounded-2xl border border-dashed border-slate-300 p-16 text-center">
+        <div class="text-6xl mb-4">📊</div>
+        <h3 class="font-bold text-slate-700 text-xl mb-2">لا يوجد تحليل سوق بعد</h3>
+        <p class="text-slate-500 mb-6">اضغط "تحليل السوق الآن" لتشغيل محرك الذكاء السوقي العميق على رسائل تيليجرام</p>
+        <p class="text-sm text-slate-400">يجب أن تكون قد جلبت رسائل أولاً من تبويب "البيانات"</p>
+      </div>
+    </template>
+
+    <!-- Report -->
+    <template x-if="marketReport">
+      <div class="space-y-6">
+
+        <!-- ═══ 1. EXECUTIVE DASHBOARD (حرج — أول ما تراه) ═══ -->
+        <div class="bg-gradient-to-l from-blue-700 to-indigo-800 rounded-2xl p-6 text-white">
+          <div class="flex flex-wrap items-start justify-between gap-4 mb-5">
+            <div>
+              <div class="text-blue-200 text-xs font-semibold uppercase tracking-widest mb-1">لوحة التحكم التنفيذية</div>
+              <h3 class="font-black text-2xl" x-text="marketReport.summary?.market_heat || '—'"></h3>
+              <p class="text-blue-200 text-sm mt-1" x-text="'تم تحليل ' + (marketReport.summary?.total_messages || 0) + ' رسالة'"></p>
+            </div>
+            <div class="bg-white/20 rounded-xl px-5 py-3 text-center">
+              <div class="text-3xl font-black" x-text="(marketReport.summary?.overall_score || 0) + '%'"></div>
+              <div class="text-blue-200 text-xs mt-1">مؤشر الحرارة السوقية</div>
+            </div>
+          </div>
+
+          <!-- 8-row executive table -->
+          <div class="bg-white/10 rounded-xl overflow-hidden">
+            <table class="w-full text-sm">
+              <template x-for="row in (marketReport.summary?.rows || [])" :key="row.label">
+                <tr class="border-b border-white/10 hover:bg-white/5 transition-colors">
+                  <td class="px-4 py-2.5 text-blue-200 font-medium whitespace-nowrap w-44">
+                    <span x-text="row.icon + ' ' + row.label"></span>
+                  </td>
+                  <td class="px-4 py-2.5 text-white font-semibold" x-text="row.value || '—'"></td>
+                </tr>
+              </template>
+            </table>
+          </div>
+
+          <!-- Insights -->
+          <template x-if="marketReport.summary?.insights?.length">
+            <div class="mt-4 space-y-1.5">
+              <template x-for="insight in marketReport.summary.insights" :key="insight">
+                <div class="flex items-start gap-2 text-sm text-blue-100">
+                  <span class="text-blue-300 mt-0.5">→</span>
+                  <span x-text="insight"></span>
+                </div>
+              </template>
+            </div>
+          </template>
+
+          <!-- Counters -->
+          <div class="grid grid-cols-4 gap-3 mt-4">
+            <div class="bg-white/15 rounded-xl p-3 text-center">
+              <div class="text-xl font-black" x-text="marketReport.opportunities?.length || 0"></div>
+              <div class="text-blue-200 text-xs mt-0.5">فرص مكتشفة</div>
+            </div>
+            <div class="bg-white/15 rounded-xl p-3 text-center">
+              <div class="text-xl font-black" x-text="marketReport.gaps?.length || 0"></div>
+              <div class="text-blue-200 text-xs mt-0.5">ثغرات السوق</div>
+            </div>
+            <div class="bg-white/15 rounded-xl p-3 text-center">
+              <div class="text-xl font-black" x-text="marketReport.priority_matrix?.filter(p=>p.class==='A').length || 0"></div>
+              <div class="text-blue-200 text-xs mt-0.5">🔴 أولوية A</div>
+            </div>
+            <div class="bg-white/15 rounded-xl p-3 text-center">
+              <div class="text-xl font-black" x-text="marketReport.keyword_categories?.length || 0"></div>
+              <div class="text-blue-200 text-xs mt-0.5">فئات نشطة</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ═══ 2. PRIORITY MATRIX A/B/C/D (مهم) ═══ -->
+        <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+          <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+            <div>
+              <h3 class="font-bold text-slate-800">🎯 مصفوفة الأولويات</h3>
+              <p class="text-xs text-slate-500 mt-0.5">الأولوية = شدة الألم × التكرار × المتضررين × احتمالية الدفع</p>
+            </div>
+            <div class="flex gap-2 text-xs font-semibold">
+              <span class="bg-red-100 text-red-700 px-2 py-1 rounded-lg">🔴 A = فوري</span>
+              <span class="bg-amber-100 text-amber-700 px-2 py-1 rounded-lg">🟡 B = قوي</span>
+              <span class="bg-blue-100 text-blue-700 px-2 py-1 rounded-lg">🔵 C = مستقبلي</span>
+            </div>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="bg-slate-50 border-b border-slate-100">
+                  <th class="text-right px-5 py-3 font-semibold text-slate-600">الفرصة / الثغرة</th>
+                  <th class="text-right px-4 py-3 font-semibold text-slate-600">النوع</th>
+                  <th class="text-right px-4 py-3 font-semibold text-slate-600">التكرار</th>
+                  <th class="text-right px-4 py-3 font-semibold text-slate-600">النقاط</th>
+                  <th class="text-right px-4 py-3 font-semibold text-slate-600">الأولوية</th>
+                  <th class="text-right px-4 py-3 font-semibold text-slate-600">فرصة الذكاء الاصطناعي</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-50">
+                <template x-for="item in (marketReport.priority_matrix || [])" :key="item.label">
+                  <tr class="hover:bg-slate-50 transition-colors">
+                    <td class="px-5 py-3">
+                      <div class="font-semibold text-slate-800 text-sm" x-text="item.label"></div>
+                      <div class="text-xs text-slate-500 mt-0.5" x-text="item.action"></div>
+                    </td>
+                    <td class="px-4 py-3">
+                      <span class="text-xs px-2 py-1 rounded-full font-medium"
+                            :class="item.type === 'فرصة' ? 'bg-blue-50 text-blue-700' : 'bg-red-50 text-red-700'"
+                            x-text="item.type"></span>
+                    </td>
+                    <td class="px-4 py-3 font-bold text-slate-700" x-text="item.frequency"></td>
+                    <td class="px-4 py-3">
+                      <div class="flex items-center gap-2">
+                        <div class="w-12 bg-slate-100 rounded-full h-1.5">
+                          <div class="h-1.5 rounded-full transition-all"
+                               :class="item.score >= 70 ? 'bg-red-500' : item.score >= 45 ? 'bg-amber-400' : item.score >= 20 ? 'bg-blue-400' : 'bg-slate-300'"
+                               :style="'width:' + item.score + '%'"></div>
+                        </div>
+                        <span class="text-xs font-bold text-slate-600" x-text="item.score"></span>
+                      </div>
+                    </td>
+                    <td class="px-4 py-3">
+                      <span class="text-sm font-black" x-text="item.badge"></span>
+                      <div class="text-xs text-slate-500 mt-0.5" x-text="item.label_detail || item.label_class || ''"></div>
+                    </td>
+                    <td class="px-4 py-3 text-xs text-indigo-700 max-w-48" x-text="item.ai_opportunity || '—'"></td>
+                  </tr>
+                </template>
+                <template x-if="!marketReport.priority_matrix?.length">
+                  <tr><td colspan="6" class="text-center text-slate-400 py-8">لا توجد بيانات كافية لبناء المصفوفة</td></tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- ═══ 3. KEYWORD CATEGORIES (مفيد) ═══ -->
+        <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+          <div class="px-5 py-4 border-b border-slate-100">
+            <h3 class="font-bold text-slate-800">🏷️ الكلمات المفتاحية المصنفة</h3>
+            <p class="text-xs text-slate-500 mt-0.5">مشاكل · طلبات · حلول · شراء · أتمتة · إدارة · نمو · دعم فني</p>
+          </div>
+          <div class="p-5 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            <template x-for="cat in (marketReport.keyword_categories || [])" :key="cat.key">
+              <div class="rounded-xl border p-3 transition-shadow hover:shadow-sm"
+                   :class="{
+                     'border-red-200 bg-red-50': cat.color === 'red',
+                     'border-blue-200 bg-blue-50': cat.color === 'blue',
+                     'border-green-200 bg-green-50': cat.color === 'green',
+                     'border-emerald-200 bg-emerald-50': cat.color === 'emerald',
+                     'border-purple-200 bg-purple-50': cat.color === 'purple',
+                     'border-slate-200 bg-slate-50': cat.color === 'slate',
+                     'border-amber-200 bg-amber-50': cat.color === 'amber',
+                     'border-orange-200 bg-orange-50': cat.color === 'orange',
+                   }">
+                <div class="flex justify-between items-center mb-2">
+                  <span class="font-bold text-sm text-slate-800" x-text="cat.label"></span>
+                  <span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-white/70 text-slate-600"
+                        x-text="cat.msg_count + ' رسالة'"></span>
+                </div>
+                <div class="flex flex-wrap gap-1">
+                  <template x-for="kw in (cat.top_keywords || []).slice(0, 5)" :key="kw.word">
+                    <span class="text-xs px-2 py-0.5 rounded-full bg-white/80 text-slate-700 font-medium">
+                      <span x-text="kw.word"></span>
+                      <span class="opacity-50 ms-0.5" x-text="'×' + kw.count"></span>
+                    </span>
+                  </template>
+                </div>
+                <div class="mt-2 text-xs font-medium"
+                     :class="{
+                       'text-red-600': cat.color === 'red',
+                       'text-blue-600': cat.color === 'blue',
+                       'text-green-600': cat.color === 'green',
+                       'text-emerald-600': cat.color === 'emerald',
+                       'text-purple-600': cat.color === 'purple',
+                       'text-slate-500': cat.color === 'slate',
+                       'text-amber-600': cat.color === 'amber',
+                       'text-orange-600': cat.color === 'orange',
+                     }"
+                     x-text="cat.intensity"></div>
+                <!-- زر عرض الرسائل -->
+                <template x-if="cat.message_samples?.length">
+                  <button @click.stop="toggleMsgs('cat_' + cat.key)"
+                          class="mt-2 w-full text-xs text-slate-500 bg-white/60 hover:bg-white border border-white/80 rounded-lg px-2 py-1 flex items-center justify-between transition-colors">
+                    <span>📨 عرض الرسائل (<span x-text="cat.message_samples.length"></span>)</span>
+                    <span x-text="showMsgs['cat_' + cat.key] ? '▲' : '▼'"></span>
+                  </button>
+                </template>
+                <template x-if="cat.message_samples?.length && showMsgs['cat_' + cat.key]">
+                  <div class="mt-2 space-y-1.5">
+                    <template x-for="(sm, si) in cat.message_samples" :key="si">
+                      <div class="bg-white rounded-lg border border-white/90 px-3 py-2 text-xs">
+                        <div class="flex items-center gap-1.5 mb-1 text-slate-400">
+                          <span class="font-semibold text-slate-700" x-text="sm.sender_name"></span>
+                          <span>·</span>
+                          <span class="truncate max-w-[80px]" x-text="sm.chat_title"></span>
+                          <span class="ms-auto flex-shrink-0" x-text="sm.received_at"></span>
+                        </div>
+                        <p class="text-slate-600 leading-relaxed" x-text="sm.content"></p>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
+            <template x-if="!marketReport.keyword_categories?.length">
+              <div class="col-span-4 text-center text-slate-400 py-8">لا توجد كلمات مفتاحية — تحتاج لمزيد من الرسائل</div>
+            </template>
+          </div>
+        </div>
+
+        <!-- Opportunities + Gaps side by side -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+          <!-- Market Opportunities -->
+          <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+            <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+              <h3 class="font-bold text-slate-800">🎯 فرص السوق المكتشفة</h3>
+              <span class="badge badge-green" x-text="(marketReport.opportunities?.length || 0) + ' فرصة'"></span>
+            </div>
+            <div class="divide-y divide-slate-50">
+              <template x-for="opp in (marketReport.opportunities || [])" :key="opp.key">
+                <div class="px-5 py-4">
+                  <div class="flex items-start justify-between gap-3 mb-2">
+                    <div>
+                      <div class="font-semibold text-slate-800 text-sm" x-text="opp.label"></div>
+                      <div class="text-xs text-slate-500 mt-0.5" x-text="'تكررت ' + opp.frequency + ' مرة — ' + opp.strength"></div>
+                    </div>
+                    <div class="flex-shrink-0">
+                      <div class="w-12 h-12 rounded-xl flex items-center justify-center text-xs font-black"
+                           :class="opp.score > 60 ? 'bg-red-100 text-red-700' : opp.score > 30 ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'"
+                           x-text="opp.score"></div>
+                    </div>
+                  </div>
+                  <!-- Score bar -->
+                  <div class="bg-slate-100 rounded-full h-1.5 mb-2">
+                    <div class="h-1.5 rounded-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all"
+                         :style="'width:' + opp.score + '%'"></div>
+                  </div>
+                  <!-- Action -->
+                  <div class="bg-blue-50 rounded-lg px-3 py-2 text-xs text-blue-800">
+                    <span class="font-semibold">الإجراء المقترح: </span>
+                    <span x-text="opp.action"></span>
+                  </div>
+                  <!-- Top phrases -->
+                  <template x-if="opp.top_phrases?.length">
+                    <div class="flex flex-wrap gap-1.5 mt-2">
+                      <template x-for="phrase in opp.top_phrases.slice(0,4)" :key="phrase">
+                        <span class="bg-slate-100 text-slate-600 text-xs px-2 py-0.5 rounded-full" x-text="phrase"></span>
+                      </template>
+                    </div>
+                  </template>
+                  <!-- Active chats -->
+                  <template x-if="opp.active_chats?.length">
+                    <div class="text-xs text-slate-400 mt-1.5" x-text="'في: ' + opp.active_chats.join(' • ')"></div>
+                  </template>
+                  <!-- زر عرض الرسائل -->
+                  <template x-if="opp.message_samples?.length">
+                    <button @click.stop="toggleMsgs('opp_' + opp.key)"
+                            class="mt-2 w-full text-xs text-blue-600 bg-blue-50 hover:bg-blue-100 border border-blue-100 rounded-lg px-3 py-1.5 flex items-center justify-between transition-colors font-medium">
+                      <span>📨 الرسائل التي أطلقت هذا المؤشر (<span x-text="opp.message_samples.length"></span>)</span>
+                      <span x-text="showMsgs['opp_' + opp.key] ? '▲' : '▼'"></span>
+                    </button>
+                  </template>
+                  <template x-if="opp.message_samples?.length && showMsgs['opp_' + opp.key]">
+                    <div class="mt-2 space-y-2 border-t border-slate-100 pt-2">
+                      <template x-for="(sm, si) in opp.message_samples" :key="si">
+                        <div class="bg-slate-50 rounded-xl border border-slate-100 px-3 py-2.5 text-xs">
+                          <div class="flex items-center gap-2 mb-1.5 flex-wrap">
+                            <span class="inline-flex items-center gap-1 bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full font-semibold">👤 <span x-text="sm.sender_name"></span></span>
+                            <span class="inline-flex items-center gap-1 bg-slate-200 text-slate-700 px-2 py-0.5 rounded-full">💬 <span x-text="sm.chat_title"></span></span>
+                            <span class="ms-auto text-slate-400" x-text="sm.received_at"></span>
+                          </div>
+                          <p class="text-slate-700 leading-relaxed" x-text="sm.content"></p>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <template x-if="!marketReport.opportunities?.length">
+                <div class="px-5 py-8 text-center text-slate-400 text-sm">لم تُكتشف فرص — الرسائل قليلة أو تحتاج مزيداً من البيانات</div>
+              </template>
+            </div>
+          </div>
+
+          <!-- Market Gaps -->
+          <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+            <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+              <h3 class="font-bold text-slate-800">🕳️ ثغرات السوق</h3>
+              <span class="badge badge-red" x-text="(marketReport.gaps?.length || 0) + ' ثغرة'"></span>
+            </div>
+            <div class="divide-y divide-slate-50">
+              <template x-for="gap in (marketReport.gaps || [])" :key="gap.key">
+                <div class="px-5 py-4">
+                  <div class="flex items-start justify-between gap-3 mb-2">
+                    <div>
+                      <div class="font-semibold text-slate-800 text-sm" x-text="gap.label"></div>
+                      <div class="text-xs mt-0.5" x-text="gap.severity"
+                           :class="gap.score > 70 ? 'text-red-600' : gap.score > 35 ? 'text-amber-600' : 'text-green-600'"></div>
+                    </div>
+                    <div class="flex-shrink-0">
+                      <div class="w-12 h-12 rounded-xl flex items-center justify-center text-xs font-black"
+                           :class="gap.score > 70 ? 'bg-red-100 text-red-700' : gap.score > 35 ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'"
+                           x-text="gap.score"></div>
+                    </div>
+                  </div>
+                  <!-- Score bar -->
+                  <div class="bg-slate-100 rounded-full h-1.5 mb-2">
+                    <div class="h-1.5 rounded-full bg-gradient-to-r from-red-400 to-orange-400 transition-all"
+                         :style="'width:' + gap.score + '%'"></div>
+                  </div>
+                  <!-- Opportunity from gap -->
+                  <div class="bg-amber-50 rounded-lg px-3 py-2 text-xs text-amber-800 mb-2">
+                    <span class="font-semibold">الفرصة الكامنة: </span>
+                    <span x-text="gap.opportunity"></span>
+                  </div>
+                  <!-- Hot topics in this gap -->
+                  <template x-if="gap.hot_topics?.length">
+                    <div class="flex flex-wrap gap-1.5">
+                      <template x-for="t in gap.hot_topics.slice(0,5)" :key="t">
+                        <span class="bg-red-50 text-red-700 text-xs px-2 py-0.5 rounded-full" x-text="t"></span>
+                      </template>
+                    </div>
+                  </template>
+                  <!-- زر عرض الرسائل -->
+                  <template x-if="gap.message_samples?.length">
+                    <button @click.stop="toggleMsgs('gap_' + gap.key)"
+                            class="mt-2 w-full text-xs text-red-600 bg-red-50 hover:bg-red-100 border border-red-100 rounded-lg px-3 py-1.5 flex items-center justify-between transition-colors font-medium">
+                      <span>📨 الرسائل التي أطلقت هذه الثغرة (<span x-text="gap.message_samples.length"></span>)</span>
+                      <span x-text="showMsgs['gap_' + gap.key] ? '▲' : '▼'"></span>
+                    </button>
+                  </template>
+                  <template x-if="gap.message_samples?.length && showMsgs['gap_' + gap.key]">
+                    <div class="mt-2 space-y-2 border-t border-slate-100 pt-2">
+                      <template x-for="(sm, si) in gap.message_samples" :key="si">
+                        <div class="bg-slate-50 rounded-xl border border-slate-100 px-3 py-2.5 text-xs">
+                          <div class="flex items-center gap-2 mb-1.5 flex-wrap">
+                            <span class="inline-flex items-center gap-1 bg-red-100 text-red-800 px-2 py-0.5 rounded-full font-semibold">👤 <span x-text="sm.sender_name"></span></span>
+                            <span class="inline-flex items-center gap-1 bg-slate-200 text-slate-700 px-2 py-0.5 rounded-full">💬 <span x-text="sm.chat_title"></span></span>
+                            <span class="ms-auto text-slate-400" x-text="sm.received_at"></span>
+                          </div>
+                          <p class="text-slate-700 leading-relaxed" x-text="sm.content"></p>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <template x-if="!marketReport.gaps?.length">
+                <div class="px-5 py-8 text-center text-slate-400 text-sm">لا ثغرات واضحة — الوضع السوقي إيجابي</div>
+              </template>
+            </div>
+          </div>
+        </div>
+
+        <!-- Hot Topics + Demand Signals -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+          <!-- Hot Topics -->
+          <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+            <div class="px-5 py-4 border-b border-slate-100">
+              <h3 class="font-bold text-slate-800">🔥 أبرز المواضيع السوقية</h3>
+              <p class="text-slate-500 text-xs mt-0.5">مرتبة حسب الأهمية الإحصائية (TF-IDF)</p>
+            </div>
+            <div class="p-5 space-y-3">
+              <template x-for="(topic, idx) in (marketReport.topics || []).slice(0,8)" :key="topic.term">
+                <div class="flex items-center gap-3">
+                  <div class="w-6 h-6 rounded-full flex items-center justify-center text-xs font-black flex-shrink-0"
+                       :class="idx === 0 ? 'bg-amber-400 text-white' : idx < 3 ? 'bg-slate-200 text-slate-600' : 'bg-slate-100 text-slate-500'"
+                       x-text="idx + 1"></div>
+                  <div class="flex-1 min-w-0">
+                    <div class="flex justify-between items-baseline mb-0.5">
+                      <span class="font-semibold text-slate-800 text-sm" x-text="topic.term"></span>
+                      <span class="text-xs text-slate-400" x-text="topic.message_count + ' رسالة'"></span>
+                    </div>
+                    <div class="flex flex-wrap gap-1">
+                      <template x-for="co in (topic.co_terms || []).slice(0,3)" :key="co">
+                        <span class="text-xs bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded" x-text="co"></span>
+                      </template>
+                      <span class="text-xs px-1.5 py-0.5 rounded"
+                            :class="topic.dominant_sentiment === 'إيجابي' ? 'bg-green-50 text-green-700' : topic.dominant_sentiment === 'سلبي' ? 'bg-red-50 text-red-700' : 'bg-slate-50 text-slate-500'"
+                            x-text="topic.dominant_sentiment"></span>
+                    </div>
+                  </div>
+                  <div class="w-16 h-2 bg-slate-100 rounded-full flex-shrink-0">
+                    <div class="h-2 rounded-full bg-blue-500 transition-all"
+                         :style="'width:' + Math.min(100, Math.round(topic.opportunity_score)) + '%'"></div>
+                  </div>
+                </div>
+              </template>
+              <template x-if="!marketReport.topics?.length">
+                <p class="text-slate-400 text-sm text-center py-4">لا توجد مواضيع بعد</p>
+              </template>
+            </div>
+          </div>
+
+          <!-- Demand Signals + Trending -->
+          <div class="space-y-4">
+
+            <!-- Demand Signals -->
+            <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+              <div class="px-5 py-4 border-b border-slate-100">
+                <h3 class="font-bold text-slate-800">🛒 إشارات الطلب الفعلي</h3>
+                <p class="text-xs text-slate-500 mt-0.5">نوايا شراء وطلب مباشرة من المحادثات</p>
+              </div>
+              <div class="p-4 space-y-3">
+                <template x-for="sig in (marketReport.demand_signals || [])" :key="sig.type">
+                  <div class="bg-emerald-50 border border-emerald-100 rounded-xl p-3">
+                    <div class="flex justify-between items-center mb-2">
+                      <span class="font-semibold text-emerald-800 text-sm" x-text="sig.label"></span>
+                      <span class="badge badge-green text-xs" x-text="sig.count + ' رسالة'"></span>
+                    </div>
+                    <div class="flex flex-wrap gap-1.5">
+                      <template x-for="item in (sig.top_items || []).slice(0,5)" :key="item.term">
+                        <span class="bg-white border border-emerald-200 text-emerald-700 text-xs px-2 py-0.5 rounded-full">
+                          <span x-text="item.term"></span>
+                          <span class="text-emerald-400 ms-1" x-text="'×' + item.count"></span>
+                        </span>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+                <template x-if="!marketReport.demand_signals?.length">
+                  <p class="text-slate-400 text-sm text-center py-3">لم تُكتشف إشارات طلب مباشر</p>
+                </template>
+              </div>
+            </div>
+
+            <!-- Trending Topics -->
+            <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+              <div class="px-5 py-4 border-b border-slate-100">
+                <h3 class="font-bold text-slate-800">📈 مواضيع صاعدة (الأيام الأخيرة)</h3>
+              </div>
+              <div class="p-4 space-y-2">
+                <template x-for="t in (marketReport.trends?.trending || []).slice(0,6)" :key="t.term">
+                  <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                      <span class="text-green-600 font-bold text-xs" x-text="t.direction"></span>
+                      <span class="text-sm font-semibold text-slate-700" x-text="t.term"></span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs text-slate-400" x-text="'×' + t.ratio + ' ضعف'"></span>
+                      <div class="w-12 h-1.5 bg-slate-100 rounded-full">
+                        <div class="h-1.5 rounded-full bg-green-500 transition-all"
+                             :style="'width:' + Math.min(100, t.ratio * 20) + '%'"></div>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+                <template x-if="!marketReport.trends?.trending?.length">
+                  <p class="text-slate-400 text-sm text-center py-3">لا توجد مواضيع صاعدة — تحتاج لرسائل من أيام متعددة</p>
+                </template>
+                <template x-if="marketReport.trends?.peak_day">
+                  <div class="mt-2 pt-2 border-t border-slate-50 flex justify-between text-xs text-slate-500">
+                    <span>يوم الذروة</span>
+                    <span class="font-bold text-blue-600" x-text="marketReport.trends.peak_day"></span>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Channel Intelligence -->
+        <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+          <div class="px-5 py-4 border-b border-slate-100">
+            <h3 class="font-bold text-slate-800">📱 ذكاء القنوات والمجموعات</h3>
+            <p class="text-xs text-slate-500 mt-0.5">حرارة السوق لكل محادثة/قناة</p>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="border-b border-slate-100 bg-slate-50">
+                  <th class="text-right px-5 py-3 font-semibold text-slate-600">المحادثة / القناة</th>
+                  <th class="text-right px-4 py-3 font-semibold text-slate-600">الرسائل</th>
+                  <th class="text-right px-4 py-3 font-semibold text-slate-600">أبرز المواضيع</th>
+                  <th class="text-right px-4 py-3 font-semibold text-slate-600">حرارة السوق</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="ch in (marketReport.channel_insights || [])" :key="ch.chat">
+                  <tr class="border-b border-slate-50 hover:bg-slate-50">
+                    <td class="px-5 py-3">
+                      <div class="font-semibold text-slate-800" x-text="ch.chat"></div>
+                      <div class="text-xs text-slate-400" x-text="ch.type"></div>
+                    </td>
+                    <td class="px-4 py-3 font-bold text-blue-600" x-text="ch.messages"></td>
+                    <td class="px-4 py-3">
+                      <div class="flex flex-wrap gap-1">
+                        <template x-for="t in (ch.top_topics || []).slice(0,3)" :key="t">
+                          <span class="bg-slate-100 text-slate-600 text-xs px-1.5 py-0.5 rounded" x-text="t"></span>
+                        </template>
+                      </div>
+                    </td>
+                    <td class="px-4 py-3">
+                      <div class="flex items-center gap-2">
+                        <div class="w-16 h-2 bg-slate-100 rounded-full">
+                          <div class="h-2 rounded-full transition-all"
+                               :class="ch.market_heat > 60 ? 'bg-red-500' : ch.market_heat > 25 ? 'bg-amber-400' : 'bg-slate-300'"
+                               :style="'width:' + ch.market_heat + '%'"></div>
+                        </div>
+                        <span class="text-xs font-medium" x-text="ch.heat_label"
+                              :class="ch.market_heat > 60 ? 'text-red-600' : ch.market_heat > 25 ? 'text-amber-600' : 'text-slate-500'"></span>
+                      </div>
+                    </td>
+                  </tr>
+                </template>
+                <template x-if="!marketReport.channel_insights?.length">
+                  <tr><td colspan="4" class="text-center text-slate-400 py-8">لا توجد بيانات قنوات</td></tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- ═══ BUYER RADAR — أشخاص جاهزون للشراء ═══ -->
+        <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+          <div class="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+            <div>
+              <h3 class="font-bold text-slate-800">🎯 رادار المشترين — User Intelligence</h3>
+              <p class="text-xs text-slate-500 mt-0.5">ترتيب المرسلين حسب احتمالية الشراء وقوة تأثيرهم</p>
+            </div>
+            <span class="badge badge-blue" x-text="(marketReport.buyer_radar?.length || 0) + ' شخص'"></span>
+          </div>
+          <template x-if="!marketReport.buyer_radar?.length">
+            <div class="px-5 py-8 text-center text-slate-400 text-sm">لا توجد بيانات مرسلين — اجلب رسائل ثم أعد التحليل</div>
+          </template>
+          <template x-if="marketReport.buyer_radar?.length">
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="bg-slate-50 border-b border-slate-100">
+                    <th class="text-right px-5 py-3 font-semibold text-slate-600">#</th>
+                    <th class="text-right px-4 py-3 font-semibold text-slate-600">المرسل</th>
+                    <th class="text-right px-4 py-3 font-semibold text-slate-600">حالة الاستعداد</th>
+                    <th class="text-right px-4 py-3 font-semibold text-slate-600">احتمال الشراء</th>
+                    <th class="text-right px-4 py-3 font-semibold text-slate-600">التأثير</th>
+                    <th class="text-right px-4 py-3 font-semibold text-slate-600">إشارات الشراء</th>
+                    <th class="text-right px-4 py-3 font-semibold text-slate-600">الاهتمامات</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-50">
+                  <template x-for="(user, idx) in (marketReport.buyer_radar || []).slice(0,15)" :key="user.sender">
+                    <tr class="hover:bg-slate-50 transition-colors">
+                      <td class="px-5 py-3">
+                        <div class="w-6 h-6 rounded-full flex items-center justify-center text-xs font-black flex-shrink-0"
+                             :class="idx === 0 ? 'bg-amber-400 text-white' : idx < 3 ? 'bg-slate-200 text-slate-700' : 'bg-slate-100 text-slate-500'"
+                             x-text="idx + 1"></div>
+                      </td>
+                      <td class="px-4 py-3">
+                        <div class="font-semibold text-slate-800 text-sm" x-text="user.sender"></div>
+                        <div class="text-xs text-slate-400" x-text="user.username ? '@' + user.username : user.message_count + ' رسالة'"></div>
+                      </td>
+                      <td class="px-4 py-3">
+                        <span class="text-xs px-2.5 py-1 rounded-full font-semibold"
+                              :class="{
+                                'bg-red-100 text-red-700': user.readiness_color === 'red',
+                                'bg-amber-100 text-amber-700': user.readiness_color === 'amber',
+                                'bg-orange-100 text-orange-700': user.readiness_color === 'orange',
+                                'bg-slate-100 text-slate-600': user.readiness_color === 'slate',
+                              }"
+                              x-text="user.readiness"></span>
+                      </td>
+                      <td class="px-4 py-3">
+                        <div class="flex items-center gap-2">
+                          <div class="w-16 bg-slate-100 rounded-full h-2">
+                            <div class="h-2 rounded-full transition-all"
+                                 :class="user.buying_probability >= 60 ? 'bg-red-500' : user.buying_probability >= 35 ? 'bg-amber-400' : 'bg-blue-400'"
+                                 :style="'width:' + user.buying_probability + '%'"></div>
+                          </div>
+                          <span class="text-xs font-bold text-slate-700" x-text="user.buying_probability + '%'"></span>
+                        </div>
+                      </td>
+                      <td class="px-4 py-3">
+                        <div class="flex items-center gap-1.5">
+                          <div class="w-10 bg-slate-100 rounded-full h-1.5">
+                            <div class="h-1.5 rounded-full bg-indigo-400 transition-all"
+                                 :style="'width:' + user.influence_score + '%'"></div>
+                          </div>
+                          <span class="text-xs text-slate-500" x-text="user.influence_score"></span>
+                        </div>
+                      </td>
+                      <td class="px-4 py-3">
+                        <div class="flex gap-1">
+                          <span class="bg-emerald-50 text-emerald-700 text-xs px-1.5 py-0.5 rounded" x-text="user.buying_signals + ' 🛒'"></span>
+                          <span class="bg-orange-50 text-orange-700 text-xs px-1.5 py-0.5 rounded" x-text="user.pain_signals + ' ⚠️'"></span>
+                        </div>
+                      </td>
+                      <td class="px-4 py-3">
+                        <div class="flex flex-wrap gap-1">
+                          <template x-for="interest in (user.interests || []).slice(0,3)" :key="interest">
+                            <span class="bg-blue-50 text-blue-700 text-xs px-1.5 py-0.5 rounded" x-text="interest"></span>
+                          </template>
+                        </div>
+                      </td>
+                      <td class="px-4 py-3">
+                        <template x-if="user.top_messages?.length">
+                          <button @click.stop="toggleMsgs('radar_' + user.sender)"
+                                  class="text-xs text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 rounded-lg px-2 py-1 whitespace-nowrap transition-colors font-medium">
+                            <span x-text="showMsgs['radar_' + user.sender] ? '▲ إخفاء' : '📨 رسائله (' + user.top_messages.length + ')'"></span>
+                          </button>
+                        </template>
+                      </td>
+                    </tr>
+                    <!-- Expandable Messages Row -->
+                    <template x-if="user.top_messages?.length && showMsgs['radar_' + user.sender]">
+                      <tr>
+                        <td colspan="8" class="px-5 pb-4 pt-0 bg-indigo-50/40">
+                          <div class="space-y-2 pt-2">
+                            <template x-for="(tm, ti) in user.top_messages" :key="ti">
+                              <div class="bg-white rounded-xl border border-indigo-100 px-4 py-2.5 text-xs">
+                                <div class="flex items-center gap-2 mb-1 text-slate-500">
+                                  <span class="inline-flex items-center gap-1 bg-slate-100 text-slate-700 px-2 py-0.5 rounded-full">💬 <span x-text="tm.chat_title"></span></span>
+                                  <span class="ms-auto" x-text="tm.received_at"></span>
+                                </div>
+                                <p class="text-slate-700 leading-relaxed" x-text="tm.content"></p>
+                              </div>
+                            </template>
+                          </div>
+                        </td>
+                      </tr>
+                    </template>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </div>
+
+        <!-- ═══ OPPORTUNITY CLUSTERS — تجميع الفرص ═══ -->
+        <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+          <div class="px-5 py-4 border-b border-slate-100">
+            <h3 class="font-bold text-slate-800">🧩 مجموعات الفرص السوقية — Opportunity Clusters</h3>
+            <p class="text-xs text-slate-500 mt-0.5">تجميع الفرص المتشابهة في حاجة سوقية مركّبة واحدة</p>
+          </div>
+          <template x-if="!marketReport.opportunity_clusters?.length">
+            <div class="px-5 py-8 text-center text-slate-400 text-sm">لا توجد مجموعات — تحتاج لمزيد من الرسائل المصنّفة</div>
+          </template>
+          <div class="p-5 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <template x-for="cluster in (marketReport.opportunity_clusters || [])" :key="cluster.name">
+              <div class="rounded-xl border p-4 hover:shadow-sm transition-shadow"
+                   :class="{
+                     'border-purple-200 bg-purple-50': cluster.color === 'purple',
+                     'border-blue-200 bg-blue-50': cluster.color === 'blue',
+                     'border-emerald-200 bg-emerald-50': cluster.color === 'emerald',
+                     'border-amber-200 bg-amber-50': cluster.color === 'amber',
+                   }">
+                <div class="flex items-start justify-between gap-3 mb-3">
+                  <div>
+                    <div class="font-bold text-slate-800 text-sm" x-text="cluster.icon + ' ' + cluster.name"></div>
+                    <div class="text-xs text-slate-500 mt-0.5" x-text="cluster.description"></div>
+                  </div>
+                  <div class="text-right flex-shrink-0">
+                    <div class="text-lg font-black text-slate-700" x-text="cluster.composite_score"></div>
+                    <div class="text-xs text-slate-400">نقطة</div>
+                  </div>
+                </div>
+                <div class="bg-white/70 rounded-lg h-1.5 mb-3">
+                  <div class="h-1.5 rounded-lg transition-all"
+                       :class="{
+                         'bg-purple-500': cluster.color === 'purple',
+                         'bg-blue-500': cluster.color === 'blue',
+                         'bg-emerald-500': cluster.color === 'emerald',
+                         'bg-amber-400': cluster.color === 'amber',
+                       }"
+                       :style="'width:' + cluster.composite_score + '%'"></div>
+                </div>
+                <div class="flex flex-wrap gap-1.5 mb-2">
+                  <template x-for="sub in (cluster.sub_opportunities || [])" :key="sub.label">
+                    <div class="bg-white/80 border border-white rounded-lg px-2 py-1 text-xs">
+                      <span class="font-medium text-slate-700" x-text="sub.label"></span>
+                      <span class="text-slate-400 ms-1" x-text="'×' + sub.freq"></span>
+                    </div>
+                  </template>
+                </div>
+                <div class="flex justify-between text-xs text-slate-500">
+                  <span>حجم السوق: <span class="font-semibold text-slate-700" x-text="cluster.market_size"></span></span>
+                  <span x-text="cluster.total_messages + ' رسالة إجمالية'"></span>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- ═══ SILENT MARKET GAPS — الثغرات الصامتة ═══ -->
+        <div class="bg-gradient-to-l from-slate-800 to-slate-900 rounded-2xl overflow-hidden">
+          <div class="px-5 py-4 border-b border-white/10 flex items-center justify-between">
+            <div>
+              <h3 class="font-bold text-white">🔇 الثغرات الصامتة — Silent Market Gaps</h3>
+              <p class="text-slate-400 text-xs mt-0.5">احتياجات يذكرها السوق باستمرار ولا يجد لها حلولاً كافية</p>
+            </div>
+            <span class="bg-white/20 text-white text-xs px-3 py-1 rounded-full font-semibold"
+                  x-text="(marketReport.silent_market_gaps?.length || 0) + ' ثغرة صامتة'"></span>
+          </div>
+          <div class="p-5">
+            <template x-if="!marketReport.silent_market_gaps?.length">
+              <div class="text-center text-slate-500 py-8 text-sm">لم تُكتشف ثغرات صامتة — السوق مُغطّى بشكل جيد</div>
+            </template>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <template x-for="sgap in (marketReport.silent_market_gaps || [])" :key="sgap.key">
+                <div class="bg-white/10 border border-white/10 rounded-xl p-4 hover:bg-white/15 transition-colors">
+                  <div class="flex items-start justify-between gap-2 mb-2">
+                    <div class="font-semibold text-white text-sm leading-snug" x-text="sgap.label"></div>
+                    <span class="text-xs px-2 py-0.5 rounded-full font-semibold flex-shrink-0"
+                          :class="{
+                            'bg-red-500/30 text-red-300': sgap.severity.includes('🔴'),
+                            'bg-amber-500/30 text-amber-300': sgap.severity.includes('🟡'),
+                            'bg-blue-500/30 text-blue-300': sgap.severity.includes('🔵'),
+                          }"
+                          x-text="sgap.severity"></span>
+                  </div>
+                  <p class="text-slate-400 text-xs leading-relaxed mb-3" x-text="sgap.gap"></p>
+                  <div class="flex justify-between items-center text-xs mb-2">
+                    <span class="text-slate-500">ذُكر <span class="text-white font-bold" x-text="sgap.total_mentions"></span> مرة</span>
+                    <span class="text-slate-500">حلول موجودة: <span class="text-amber-300 font-bold" x-text="sgap.solution_mentions"></span></span>
+                  </div>
+                  <div class="bg-white/10 rounded-full h-1.5 mb-2">
+                    <div class="h-1.5 rounded-full bg-gradient-to-r from-red-400 to-orange-400 transition-all"
+                         :style="'width:' + sgap.score + '%'"></div>
+                  </div>
+                  <template x-if="sgap.sample && !sgap.message_samples?.length">
+                    <p class="text-slate-500 text-xs italic mt-2 leading-relaxed" x-text="'\"' + sgap.sample + '\"'"></p>
+                  </template>
+                  <!-- زر عرض الرسائل -->
+                  <template x-if="sgap.message_samples?.length">
+                    <button @click.stop="toggleMsgs('sgap_' + sgap.key)"
+                            class="mt-2 w-full text-xs text-slate-300 bg-white/10 hover:bg-white/20 border border-white/10 rounded-lg px-3 py-1.5 flex items-center justify-between transition-colors font-medium">
+                      <span>📨 الرسائل المرتبطة (<span x-text="sgap.message_samples.length"></span>)</span>
+                      <span x-text="showMsgs['sgap_' + sgap.key] ? '▲' : '▼'"></span>
+                    </button>
+                  </template>
+                  <template x-if="sgap.message_samples?.length && showMsgs['sgap_' + sgap.key]">
+                    <div class="mt-2 space-y-2 border-t border-white/10 pt-2">
+                      <template x-for="(sm, si) in sgap.message_samples" :key="si">
+                        <div class="bg-white/10 rounded-xl px-3 py-2.5 text-xs border border-white/10">
+                          <div class="flex items-center gap-2 mb-1.5 flex-wrap">
+                            <span class="inline-flex items-center gap-1 bg-white/20 text-white px-2 py-0.5 rounded-full font-semibold">👤 <span x-text="sm.sender_name"></span></span>
+                            <span class="inline-flex items-center gap-1 bg-white/10 text-slate-300 px-2 py-0.5 rounded-full">💬 <span x-text="sm.chat_title"></span></span>
+                            <span class="ms-auto text-slate-500" x-text="sm.received_at"></span>
+                          </div>
+                          <p class="text-slate-300 leading-relaxed" x-text="sm.content"></p>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </template>
+
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <!-- TAB 4: AGENT RULES -->
+  <!-- ══════════════════════════════════════════════════════ -->
+  <div x-show="tab === 'rules'">
+    <div class="grid grid-cols-1 lg:grid-cols-5 gap-6">
+      <!-- Add Rule Form -->
+      <div class="lg:col-span-2 bg-white rounded-2xl border border-slate-200 p-6">
+        <h3 class="font-bold text-slate-800 text-lg mb-4">إضافة قاعدة رد جديدة</h3>
+        <form @submit.prevent="addRule()" class="space-y-4">
+          <div>
+            <label class="block text-sm font-semibold text-slate-700 mb-1.5">اسم القاعدة</label>
+            <input x-model="ruleForm.rule_name" type="text" placeholder="مثال: رد على العملاء" class="form-input" required />
+          </div>
+          <div>
+            <label class="block text-sm font-semibold text-slate-700 mb-1.5">الهدف</label>
+            <select x-model="ruleForm.target_type" class="form-input">
+              <option value="all">جميع الرسائل</option>
+              <option value="user">مستخدم محدد</option>
+              <option value="group">مجموعة محددة</option>
+              <option value="keyword">بناءً على كلمات مفتاحية</option>
+            </select>
+          </div>
+          <template x-if="ruleForm.target_type === 'user'">
+            <div>
+              <label class="block text-sm font-semibold text-slate-700 mb-1.5">اسم المستخدم</label>
+              <input x-model="ruleForm.target_sender_username" type="text" placeholder="@username" class="form-input" />
+            </div>
+          </template>
+          <template x-if="ruleForm.target_type === 'group'">
+            <div>
+              <label class="block text-sm font-semibold text-slate-700 mb-1.5">معرف المجموعة</label>
+              <input x-model="ruleForm.target_chat_id" type="text" placeholder="Chat ID" class="form-input" />
+            </div>
+          </template>
+          <div>
+            <label class="block text-sm font-semibold text-slate-700 mb-1.5">كلمات مفتاحية (مفصولة بفاصلة)</label>
+            <input x-model="ruleForm.keywords" type="text" placeholder="مثال: سعر, منتج, شراء" class="form-input" />
+          </div>
+          <div>
+            <label class="block text-sm font-semibold text-slate-700 mb-1.5">نمط الرد</label>
+            <select x-model="ruleForm.reply_mode" class="form-input">
+              <option value="manual">يدوي (أنا أختار متى أرد)</option>
+              <option value="template">قالب ثابت</option>
+              <option value="agent">وكيل الذكاء الاصطناعي</option>
+            </select>
+          </div>
+          <template x-if="ruleForm.reply_mode === 'template' || ruleForm.reply_mode === 'agent'">
+            <div>
+              <label class="block text-sm font-semibold text-slate-700 mb-1.5">نص الرد / توجيه الوكيل</label>
+              <textarea x-model="ruleForm.reply_template" rows="3" placeholder="أدخل نص الرد أو تعليمات الوكيل..." class="form-input"></textarea>
+            </div>
+          </template>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-sm font-semibold text-slate-700 mb-1.5">تأخير الرد (ثانية)</label>
+              <input x-model.number="ruleForm.reply_delay_seconds" type="number" min="0" max="300" class="form-input" />
+            </div>
+            <div>
+              <label class="block text-sm font-semibold text-slate-700 mb-1.5">حد الردود/ساعة</label>
+              <input x-model.number="ruleForm.max_replies_per_hour" type="number" min="1" max="100" class="form-input" />
+            </div>
+          </div>
+          <button type="submit" class="btn-primary w-full justify-center" :disabled="savingRule">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+            <span x-text="savingRule ? 'جاري الحفظ...' : 'إضافة القاعدة'"></span>
+          </button>
+        </form>
+      </div>
+
+      <!-- Rules List -->
+      <div class="lg:col-span-3">
+        <h3 class="font-bold text-slate-800 text-lg mb-4">قواعد الرد النشطة</h3>
+        <template x-if="rules.length === 0">
+          <div class="bg-white rounded-2xl border border-slate-200 p-10 text-center text-slate-400">
+            <svg class="w-12 h-12 mx-auto mb-3 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/></svg>
+            <p>لا توجد قواعد بعد. أضف قاعدتك الأولى!</p>
+          </div>
+        </template>
+        <template x-for="rule in rules" :key="rule.id">
+          <div class="rule-card" :class="rule.is_active ? 'border-blue-200' : 'opacity-60'">
+            <div class="flex items-start gap-3">
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 mb-1">
+                  <span class="font-bold text-slate-800 text-sm" x-text="rule.rule_name"></span>
+                  <span class="badge text-xs" :class="rule.is_active ? 'badge-green' : 'badge-gray'"
+                        x-text="rule.is_active ? 'نشط' : 'متوقف'"></span>
+                </div>
+                <div class="text-xs text-slate-500 space-y-0.5">
+                  <div>الهدف: <span class="font-medium" x-text="targetLabel(rule.target_type)"></span></div>
+                  <div>نمط الرد: <span class="font-medium" x-text="replyModeLabel(rule.reply_mode)"></span></div>
+                  <template x-if="rule.keywords && rule.keywords.length > 0">
+                    <div class="flex gap-1 flex-wrap mt-1">
+                      <template x-for="kw in rule.keywords" :key="kw">
+                        <span class="bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full text-xs" x-text="kw"></span>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+                <div class="text-xs text-slate-400 mt-1">ردود مرسلة: <span x-text="rule.replies_sent"></span></div>
+              </div>
+              <div class="flex gap-1.5 flex-shrink-0">
+                <button @click="toggleRule(rule)" class="text-xs px-2.5 py-1.5 rounded-lg font-medium transition-colors"
+                        :class="rule.is_active ? 'bg-amber-50 text-amber-700 hover:bg-amber-100' : 'bg-green-50 text-green-700 hover:bg-green-100'"
+                        x-text="rule.is_active ? 'إيقاف' : 'تفعيل'"></button>
+                <button @click="deleteRule(rule.id)" class="text-xs bg-red-50 text-red-700 hover:bg-red-100 px-2.5 py-1.5 rounded-lg font-medium transition-colors">حذف</button>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════ -->
+  <!-- Reply Modal -->
+  <!-- ══════════════════════════════════════════════════════ -->
+  <template x-if="replyModal.open">
+    <div class="modal-overlay" @click.self="replyModal.open=false">
+      <div class="modal-box p-6 max-w-lg">
+        <h3 class="font-bold text-slate-800 text-lg mb-2">الرد على الرسالة</h3>
+        <div class="bg-slate-50 rounded-xl p-3 mb-4 text-sm text-slate-700" x-text="replyModal.originalMsg"></div>
+        <div class="mb-1 text-xs text-slate-500">من: <span class="font-medium" x-text="replyModal.senderName"></span></div>
+        <div class="mb-4 text-xs text-slate-500">في: <span class="font-medium" x-text="replyModal.chatTitle"></span></div>
+        <textarea x-model="replyModal.text" rows="4" placeholder="اكتب ردك هنا..." class="form-input mb-4"></textarea>
+        <div class="flex gap-3">
+          <button @click="sendReply()" class="btn-primary flex-1 justify-center" :disabled="replyModal.sending">
+            <svg class="w-4 h-4" :class="{'animate-spin': replyModal.sending}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>
+            <span x-text="replyModal.sending ? 'جاري الإرسال...' : 'إرسال الرد'"></span>
+          </button>
+          <button @click="replyModal.open=false" class="btn-secondary">إلغاء</button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.5/dist/cdn.min.js" defer></script>
+<script>
+function telegramApp() {
+  return {
+    tab: 'settings',
+    status: '{{ account.status if account else "disconnected" }}',
+    accountInfo: '{{ (account.telegram_first_name or "") + (" @" + account.telegram_username if account and account.telegram_username else "") if account else "" }}',
+    totalMessages: {{ messages|length }},
+    messages: {{ messages_json|safe }},
+    rules: {{ rules_json|safe }},
+    toast: null,
+    toastType: 'success',
+    syncing: false,
+    requesting: false,
+    verifying: false,
+    validating: false,
+    analyzingMarket: false,
+    autoAnalyzing: false,
+    autoAnalysisEnabled: true,
+    lastAutoUpdate: null,
+    marketReport: null,
+    savingRule: false,
+    msgFilter: '',
+    msgDirectionFilter: '',
+    msgReadFilter: '',
+    form: { api_id: '{{ account.api_id or "" if account else "" }}', api_hash: '', phone: '{{ account.phone or "" if account else "" }}', code: '' },
+    ruleForm: { rule_name: '', target_type: 'all', target_chat_id: '', target_sender_username: '', keywords: '', reply_mode: 'manual', reply_template: '', reply_delay_seconds: 0, max_replies_per_hour: 10 },
+    replyModal: { open: false, messageId: null, originalMsg: '', senderName: '', chatTitle: '', text: '', sending: false },
+
+    showMsgs: {},
+    toggleMsgs(key) { this.showMsgs[key] = !this.showMsgs[key]; },
+
+    autoSyncing: false,
+    connectionChecking: false,
+    lastSyncTime: null,
+    newMsgAlert: false,
+    syncNewCount: 0,
+
+    init() {
+      this.loadMarketReport();
+      if (this.status === 'connected') {
+        this._startAutoPoll();
+        this._startAutoAnalysis();
+        this._startConnectionWatch();
+      }
+    },
+
+    /* ─── Auto Sync: سحب رسائل جديدة من تيليجرام كل 30 ثانية ─── */
+    _startAutoPoll() {
+      this._isSyncing = false;
+      setInterval(async () => {
+        if (this._isSyncing || this.status !== 'connected') return;
+        this._isSyncing = true;
+        this.autoSyncing = true;
+        try {
+          const r = await fetch('/api/v1/telegram/messages/sync', { method: 'POST' });
+          const data = await r.json();
+          if (data.success && data.count > 0) {
+            this.syncNewCount = data.count;
+            await this._refreshMessages();
+            this.lastSyncTime = new Date().toLocaleTimeString('ar-SA');
+            this.showToast(`📩 وصلت ${data.count} رسالة جديدة`, 'success');
+            await this._silentAnalysis();
+          } else {
+            this.lastSyncTime = new Date().toLocaleTimeString('ar-SA');
+          }
+        } catch(e) { /* silent */ }
+        finally { this._isSyncing = false; this.autoSyncing = false; }
+      }, 30000);
+    },
+
+    /* ─── Connection Watch: تفقد حالة الاتصال كل 3 دقائق ─── */
+    _startConnectionWatch() {
+      setInterval(async () => {
+        if (this.connectionChecking) return;
+        this.connectionChecking = true;
+        try {
+          const r = await fetch('/api/v1/telegram/connect/validate', { method: 'POST' });
+          const data = await r.json();
+          if (!data.valid && this.status === 'connected') {
+            this.status = 'error';
+            this.showToast('⚠️ انتهت جلسة تيليجرام — يرجى إعادة الاتصال', 'error');
+          } else if (data.valid && this.status !== 'connected') {
+            this.status = 'connected';
+          }
+        } catch(e) { /* silent */ }
+        finally { this.connectionChecking = false; }
+      }, 180000);
+    },
+
+    /* ─── Auto Analysis: تحديث تقرير السوق كل 5 دقائق ─── */
+    _startAutoAnalysis() {
+      setInterval(async () => {
+        if (!this.autoAnalysisEnabled || this.analyzingMarket || this.autoAnalyzing) return;
+        if (this.totalMessages === 0) return;
+        await this._silentAnalysis();
+      }, 300000);
+    },
+
+    async _silentAnalysis() {
+      if (this.autoAnalyzing || this.analyzingMarket) return;
+      this.autoAnalyzing = true;
+      try {
+        await fetch('/api/v1/telegram/messages/analyze', { method: 'POST' });
+        const r = await fetch('/api/v1/telegram/analysis/market', { method: 'POST' });
+        const data = await r.json();
+        if (data.success && data.result) {
+          this.marketReport = data.result;
+          this.lastAutoUpdate = new Date().toLocaleTimeString('ar-SA');
+        }
+      } catch(e) { /* silent */ }
+      finally { this.autoAnalyzing = false; }
+    },
+
+    async _refreshMessages() {
+      try {
+        const r = await fetch('/api/v1/telegram/messages/list');
+        const data = await r.json();
+        this.messages = data.messages;
+        this.totalMessages = data.messages.length;
+      } catch(e) { /* silent */ }
+    },
+
+    statusLabel() {
+      const labels = { connected: '✅ متصل بتيليجرام', disconnected: '⚫ غير متصل', pending_code: '⏳ في انتظار رمز التحقق', error: '❌ خطأ في الاتصال' };
+      return labels[this.status] || 'غير معروف';
+    },
+
+    get unreadCount() {
+      return this.messages.filter(m => !m.is_read && m.direction === 'incoming').length;
+    },
+
+    get filteredMessages() {
+      return this.messages.filter(m => {
+        const matchText = !this.msgFilter || (m.content||'').includes(this.msgFilter) || (m.sender_name||'').includes(this.msgFilter) || (m.chat_title||'').includes(this.msgFilter);
+        const matchDir = !this.msgDirectionFilter || m.direction === this.msgDirectionFilter;
+        const matchRead = !this.msgReadFilter || (this.msgReadFilter === 'unread' ? !m.is_read : m.is_read);
+        return matchText && matchDir && matchRead;
+      });
+    },
+
+    get analysisStats() {
+      return {
+        analyzed: this.messages.filter(m => m.is_analyzed).length,
+        replied: this.messages.filter(m => m.reply_sent).length,
+      };
+    },
+
+    get sentimentData() {
+      const analyzed = this.messages.filter(m => m.is_analyzed && m.analysis_result);
+      const counts = { 'إيجابي': 0, 'سلبي': 0, 'محايد': 0 };
+      analyzed.forEach(m => { counts[m.analysis_result.sentiment] = (counts[m.analysis_result.sentiment] || 0) + 1; });
+      return [
+        { label: '😊 إيجابي', count: counts['إيجابي'], color: 'bg-green-500' },
+        { label: '😞 سلبي', count: counts['سلبي'], color: 'bg-red-500' },
+        { label: '😐 محايد', count: counts['محايد'], color: 'bg-slate-400' },
+      ];
+    },
+
+    get intentData() {
+      const analyzed = this.messages.filter(m => m.is_analyzed && m.analysis_result);
+      const counts = {};
+      analyzed.forEach(m => {
+        const intent = m.analysis_result.intent || 'عام';
+        counts[intent] = (counts[intent] || 0) + 1;
+      });
+      return Object.entries(counts).map(([label, count]) => ({ label, count })).sort((a,b) => b.count - a.count);
+    },
+
+    get topSenders() {
+      const map = {};
+      this.messages.filter(m => m.direction === 'incoming').forEach(m => {
+        const key = m.sender_name || 'مجهول';
+        if (!map[key]) map[key] = { name: key, count: 0, chat: m.chat_title, last: m.received_at };
+        map[key].count++;
+        if (m.received_at > map[key].last) map[key].last = m.received_at;
+      });
+      return Object.values(map).sort((a,b) => b.count - a.count).slice(0, 10).map(s => ({
+        ...s, last: s.last ? new Date(s.last).toLocaleDateString('ar-SA') : '-'
+      }));
+    },
+
+    async requestCode() {
+      this.requesting = true;
+      const fd = new FormData();
+      fd.append('api_id', this.form.api_id);
+      fd.append('api_hash', this.form.api_hash);
+      fd.append('phone', this.form.phone);
+      const r = await fetch('/api/v1/telegram/connect/request-code', { method: 'POST', body: fd });
+      const data = await r.json();
+      this.requesting = false;
+      this.showToast(data.message, data.success ? 'success' : 'error');
+      if (data.success) this.status = 'pending_code';
+    },
+
+    async verifyCode() {
+      this.verifying = true;
+      const fd = new FormData();
+      fd.append('code', this.form.code);
+      const r = await fetch('/api/v1/telegram/connect/verify-code', { method: 'POST', body: fd });
+      const data = await r.json();
+      this.verifying = false;
+      this.showToast(data.message, data.success ? 'success' : 'error');
+      if (data.success) { this.status = 'connected'; location.reload(); }
+    },
+
+    async runMarketAnalysis() {
+      if (this.totalMessages === 0) {
+        this.showToast('اجلب الرسائل أولاً من تبويب البيانات', 'error');
+        return;
+      }
+      this.analyzingMarket = true;
+      try {
+        const r = await fetch('/api/v1/telegram/analysis/market', { method: 'POST' });
+        const data = await r.json();
+        if (data.success) {
+          this.marketReport = data.result;
+          this.showToast(data.message, 'success');
+        } else {
+          this.showToast(data.message, 'error');
+        }
+      } catch (e) {
+        this.showToast('خطأ في التحليل: ' + e.message, 'error');
+      } finally {
+        this.analyzingMarket = false;
+      }
+    },
+
+    async loadMarketReport() {
+      const r = await fetch('/api/v1/telegram/analysis/market');
+      const data = await r.json();
+      if (data.has_data) {
+        this.marketReport = data.result;
+        if (data.analyzed_at) {
+          const d = new Date(data.analyzed_at);
+          this.lastAutoUpdate = d.toLocaleTimeString('ar-SA');
+        }
+      }
+    },
+
+    async validateSession() {
+      this.validating = true;
+      const r = await fetch('/api/v1/telegram/connect/validate', { method: 'POST' });
+      const data = await r.json();
+      this.validating = false;
+      this.showToast(data.message, data.valid ? 'success' : 'error');
+      if (!data.valid) this.status = 'error';
+    },
+
+    async disconnect() {
+      if (!confirm('هل تريد قطع الاتصال بتيليجرام؟')) return;
+      await fetch('/api/v1/telegram/connect/disconnect', { method: 'POST' });
+      this.status = 'disconnected';
+      this.accountInfo = '';
+      this.showToast('تم قطع الاتصال', 'success');
+    },
+
+    async syncMessages() {
+      this.syncing = true;
+      const r = await fetch('/api/v1/telegram/messages/sync', { method: 'POST' });
+      const data = await r.json();
+      this.syncing = false;
+      this.showToast(data.message, data.success ? 'success' : 'error');
+      if (data.success) {
+        await this._refreshMessages();
+        this._knownTotal = this.totalMessages;
+        this.lastSyncTime = new Date().toLocaleTimeString('ar-SA');
+      }
+    },
+
+    async analyzeMessages() {
+      const r = await fetch('/api/v1/telegram/messages/analyze', { method: 'POST' });
+      const data = await r.json();
+      this.showToast(data.message, data.success ? 'success' : 'error');
+      if (data.success && data.count > 0) {
+        await this._refreshMessages();
+      }
+    },
+
+    openReplyModal(msg) {
+      if (msg.direction !== 'incoming') return;
+      this.replyModal = { open: true, messageId: msg.id, originalMsg: msg.content, senderName: msg.sender_name, chatTitle: msg.chat_title, text: '', sending: false };
+    },
+
+    async sendReply() {
+      if (!this.replyModal.text.trim()) return;
+      this.replyModal.sending = true;
+      const fd = new FormData();
+      fd.append('reply_text', this.replyModal.text);
+      const r = await fetch(`/api/v1/telegram/messages/${this.replyModal.messageId}/reply`, { method: 'POST', body: fd });
+      const data = await r.json();
+      this.replyModal.sending = false;
+      this.showToast(data.message, data.success ? 'success' : 'error');
+      if (data.success) {
+        const msg = this.messages.find(m => m.id === this.replyModal.messageId);
+        if (msg) msg.reply_sent = true;
+        this.replyModal.open = false;
+      }
+    },
+
+    async markRead(msg) {
+      await fetch(`/api/v1/telegram/messages/${msg.id}/mark-read`, { method: 'POST' });
+      msg.is_read = true;
+    },
+
+    async addRule() {
+      this.savingRule = true;
+      const fd = new FormData();
+      Object.entries(this.ruleForm).forEach(([k,v]) => fd.append(k, v));
+      const r = await fetch('/api/v1/telegram/rules', { method: 'POST', body: fd });
+      const data = await r.json();
+      this.savingRule = false;
+      this.showToast(data.message, data.success ? 'success' : 'error');
+      if (data.success) {
+        const r2 = await fetch('/api/v1/telegram/rules');
+        const d2 = await r2.json();
+        this.rules = d2.rules;
+        this.ruleForm = { rule_name: '', target_type: 'all', target_chat_id: '', target_sender_username: '', keywords: '', reply_mode: 'manual', reply_template: '', reply_delay_seconds: 0, max_replies_per_hour: 10 };
+      }
+    },
+
+    async toggleRule(rule) {
+      await fetch(`/api/v1/telegram/rules/${rule.id}/toggle`, { method: 'POST' });
+      rule.is_active = !rule.is_active;
+    },
+
+    async deleteRule(id) {
+      if (!confirm('حذف هذه القاعدة؟')) return;
+      await fetch(`/api/v1/telegram/rules/${id}`, { method: 'DELETE' });
+      this.rules = this.rules.filter(r => r.id !== id);
+    },
+
+    targetLabel(t) { return { all: 'جميع الرسائل', user: 'مستخدم محدد', group: 'مجموعة محددة', keyword: 'كلمات مفتاحية' }[t] || t; },
+    replyModeLabel(m) { return { manual: 'يدوي', template: 'قالب ثابت', agent: 'وكيل ذكاء اصطناعي' }[m] || m; },
+
+    formatDate(d) { return d ? new Date(d).toLocaleString('ar-SA') : '-'; },
+
+    stringToColor(str) {
+      if (!str) return '#94a3b8';
+      let hash = 0;
+      for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
+      const colors = ['#3b82f6','#8b5cf6','#ec4899','#f59e0b','#10b981','#06b6d4','#ef4444','#84cc16'];
+      return colors[Math.abs(hash) % colors.length];
+    },
+
+    showToast(msg, type = 'success') {
+      this.toast = msg;
+      this.toastType = type;
+      setTimeout(() => this.toast = null, 4000);
+    },
+  };
+}
+</script>
+{% endblock %}

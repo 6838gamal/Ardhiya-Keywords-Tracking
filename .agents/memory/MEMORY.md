@@ -1,0 +1,2 @@
+- [Enterprise AI Platform Setup](platform-setup.md) — bcrypt must be used directly (not passlib); PyJWT replaces python-jose (blocked by firewall); SQLAlchemy enums need native_enum=False on PostgreSQL to avoid duplicate type errors.
+- [Project Structure](project-structure.md) — Single Python project at root: app/, static/, run.py, requirements.txt, Dockerfile. No frontend/ or backend/ split. Port 5000 webview. workflow command: python3 run.py

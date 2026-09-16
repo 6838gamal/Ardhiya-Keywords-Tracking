@@ -1,0 +1,697 @@
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+from app.core.config import settings
+from app.core.database import Base, engine, SessionLocal
+from app.api.v1.api import api_router
+from app.api.public.router import router as public_router
+from app.web.router import router as web_router
+
+from app.domains.youtube.api import router as youtube_api_router
+
+from app.domains.youtube.web import router as youtube_web_router
+
+import os
+from datetime import datetime
+
+# ── Global server state (for /status page) ───────────────────────────────────
+_SERVER_START = datetime.utcnow()
+_keepalive_state: dict = {
+    "url":        None,
+    "last_ping":  None,
+    "last_status": None,
+    "ping_count": 0,
+    "fail_count": 0,
+    "history":    [],   # last 10 results
+    "db_ok":      None, # None = not checked yet
+    "last_fail_notified": 0,  # fail_count snapshot for change detection
+}
+
+
+def _calc_next_ping_in() -> int:
+    """Seconds until the next server-side keepalive ping."""
+    INTERVAL = 7 * 60
+    now = datetime.utcnow()
+    uptime = int((now - _SERVER_START).total_seconds())
+    if _keepalive_state["last_ping"]:
+        try:
+            elapsed = int((now - datetime.fromisoformat(_keepalive_state["last_ping"])).total_seconds())
+            return max(0, INTERVAL - elapsed)
+        except Exception:
+            return INTERVAL
+    return max(0, INTERVAL - ((uptime - 20) % INTERVAL)) if uptime > 20 else max(0, 20 - uptime)
+
+
+class NoCacheHTMLMiddleware(BaseHTTPMiddleware):
+    """Add Cache-Control: no-store to all protected HTML page responses."""
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        content_type = response.headers.get("content-type", "")
+        if "text/html" in content_type:
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    version=settings.VERSION,
+    openapi_url=f"{settings.API_V1_STR}/openapi.json",
+)
+
+app.add_middleware(NoCacheHTMLMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.BACKEND_CORS_ORIGINS_LIST,  # ← من config.py
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Static files — relative to project root
+static_dir = os.path.join(os.path.dirname(__file__), "../static")
+if os.path.exists(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    from fastapi.responses import FileResponse, Response
+    fav = os.path.join(os.path.dirname(__file__), "../static/favicon.ico")
+    if os.path.exists(fav):
+        return FileResponse(fav)
+    return Response(status_code=204)
+
+
+# Internal API routes
+app.include_router(api_router, prefix=settings.API_V1_STR)
+
+# Public API routes (API-key authenticated)
+app.include_router(public_router, prefix="/api/public/v1")
+
+# Web (HTML) routes
+app.include_router(web_router)
+
+# YouTube REST API
+app.include_router(youtube_api_router)
+
+
+
+# YouTube Web Pages (HTML)  ← أضف هذا
+app.include_router(youtube_web_router)
+
+
+
+
+@app.on_event("startup")
+def startup():
+    import threading
+    # ── Run critical column-addition migrations SYNCHRONOUSLY ─────────────
+    # Must complete before any request is served, because SQLAlchemy ORM
+    # maps ALL model columns at query time (even on simple COUNT queries).
+    try:
+        from sqlalchemy import text as _text
+        _critical = [
+            "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS file_path VARCHAR(500)",
+            "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS file_name VARCHAR(255)",
+            "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS file_size INTEGER DEFAULT 0",
+            "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS is_trained BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS trained_at TIMESTAMP",
+            "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS retrieval_count INTEGER DEFAULT 0",
+            "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS last_retrieved_at TIMESTAMP",
+            "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS domain VARCHAR(50) DEFAULT 'general'",
+            "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS visibility VARCHAR(30) DEFAULT 'global'",
+            "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS allowed_agent_types JSONB DEFAULT '[]'",
+            "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS importance_score FLOAT DEFAULT 1.0",
+            "ALTER TABLE agents ADD COLUMN IF NOT EXISTS domain VARCHAR(50)",
+            "ALTER TABLE agents ADD COLUMN IF NOT EXISTS knowledge_domains JSONB DEFAULT '[]'",
+            "ALTER TABLE agents ADD COLUMN IF NOT EXISTS agent_priority INTEGER DEFAULT 5",
+            "ALTER TABLE agents ADD COLUMN IF NOT EXISTS max_context_docs INTEGER DEFAULT 5",
+            # YouTube — safety net for re-deploys
+            "ALTER TABLE youtube_videos ADD COLUMN IF NOT EXISTS query_source VARCHAR(255)",
+            "ALTER TABLE youtube_videos ADD COLUMN IF NOT EXISTS tags TEXT[]",
+            "ALTER TABLE video_snapshots ADD COLUMN IF NOT EXISTS captured_at TIMESTAMP DEFAULT NOW()",
+        ]
+        with engine.connect() as _conn:
+            for _sql in _critical:
+                try:
+                    _conn.execute(_text(_sql))
+                except Exception:
+                    pass
+            _conn.commit()
+    except Exception as _e:
+        print(f"[Startup] Critical migration warning: {_e}")
+
+    def init_db():
+        try:
+            Base.metadata.create_all(bind=engine)
+            # Migrate new knowledge_documents columns (idempotent)
+            from sqlalchemy import text
+            migrations = [
+                "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS file_path VARCHAR(500)",
+                "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS file_name VARCHAR(255)",
+                "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS file_size INTEGER DEFAULT 0",
+                "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS is_trained BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS trained_at TIMESTAMP",
+                # Telegram tables
+                """CREATE TABLE IF NOT EXISTS telegram_accounts (
+                    id SERIAL PRIMARY KEY,
+                    api_id VARCHAR(50),
+                    api_hash VARCHAR(100),
+                    phone VARCHAR(30),
+                    session_string TEXT,
+                    phone_code_hash VARCHAR(200),
+                    status VARCHAR(30) DEFAULT 'disconnected',
+                    telegram_user_id VARCHAR(50),
+                    telegram_username VARCHAR(100),
+                    telegram_first_name VARCHAR(100),
+                    error_message TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )""",
+                """CREATE TABLE IF NOT EXISTS telegram_messages (
+                    id SERIAL PRIMARY KEY,
+                    account_id INTEGER REFERENCES telegram_accounts(id),
+                    message_id INTEGER,
+                    chat_id VARCHAR(50),
+                    chat_title VARCHAR(255),
+                    chat_type VARCHAR(30),
+                    sender_id VARCHAR(50),
+                    sender_name VARCHAR(255),
+                    sender_username VARCHAR(100),
+                    content TEXT,
+                    media_type VARCHAR(30),
+                    direction VARCHAR(10) DEFAULT 'incoming',
+                    is_read BOOLEAN DEFAULT FALSE,
+                    analysis_result JSONB DEFAULT '{}',
+                    is_analyzed BOOLEAN DEFAULT FALSE,
+                    reply_sent BOOLEAN DEFAULT FALSE,
+                    replied_at TIMESTAMP,
+                    received_at TIMESTAMP DEFAULT NOW(),
+                    created_at TIMESTAMP DEFAULT NOW()
+                )""",
+                """CREATE TABLE IF NOT EXISTS telegram_reply_rules (
+                    id SERIAL PRIMARY KEY,
+                    account_id INTEGER REFERENCES telegram_accounts(id),
+                    rule_name VARCHAR(255) NOT NULL,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    target_type VARCHAR(30) DEFAULT 'all',
+                    target_chat_id VARCHAR(50),
+                    target_sender_username VARCHAR(100),
+                    keywords JSONB DEFAULT '[]',
+                    reply_mode VARCHAR(30) DEFAULT 'manual',
+                    agent_id INTEGER REFERENCES agents(id),
+                    reply_template TEXT,
+                    reply_delay_seconds INTEGER DEFAULT 0,
+                    max_replies_per_hour INTEGER DEFAULT 10,
+                    replies_sent INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )""",
+                "ALTER TABLE telegram_accounts ADD COLUMN IF NOT EXISTS market_analysis JSONB",
+                "ALTER TABLE telegram_accounts ADD COLUMN IF NOT EXISTS market_analysis_at TIMESTAMP",
+                # RAG v3.0 — knowledge_chunks (per-chunk BM25 retrieval)
+                """CREATE TABLE IF NOT EXISTS knowledge_chunks (
+                    id SERIAL PRIMARY KEY,
+                    document_id INTEGER REFERENCES knowledge_documents(id) ON DELETE CASCADE,
+                    chunk_index INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    keywords JSONB DEFAULT '[]',
+                    questions JSONB DEFAULT '[]',
+                    section_heading VARCHAR(500),
+                    char_count INTEGER DEFAULT 0,
+                    word_count INTEGER DEFAULT 0,
+                    importance_score FLOAT DEFAULT 1.0,
+                    retrieval_count INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )""",
+                # RAG v3.0 — knowledge_feedback (feedback loop)
+                """CREATE TABLE IF NOT EXISTS knowledge_feedback (
+                    id SERIAL PRIMARY KEY,
+                    query TEXT NOT NULL,
+                    doc_id INTEGER REFERENCES knowledge_documents(id),
+                    chunk_id INTEGER REFERENCES knowledge_chunks(id),
+                    was_helpful BOOLEAN,
+                    feedback_text TEXT,
+                    confidence_shown VARCHAR(10),
+                    created_at TIMESTAMP DEFAULT NOW()
+                )""",
+                # RAG v3.0 — retrieval analytics on documents
+                "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS retrieval_count INTEGER DEFAULT 0",
+                "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS last_retrieved_at TIMESTAMP",
+                # Knowledge Domain Architecture
+                "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS domain VARCHAR(50) DEFAULT 'general'",
+                "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS visibility VARCHAR(30) DEFAULT 'global'",
+                "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS allowed_agent_types JSONB DEFAULT '[]'",
+                "ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS importance_score FLOAT DEFAULT 1.0",
+                # Agent Orchestration fields
+                "ALTER TABLE agents ADD COLUMN IF NOT EXISTS domain VARCHAR(50)",
+                "ALTER TABLE agents ADD COLUMN IF NOT EXISTS knowledge_domains JSONB DEFAULT '[]'",
+                "ALTER TABLE agents ADD COLUMN IF NOT EXISTS agent_priority INTEGER DEFAULT 5",
+                "ALTER TABLE agents ADD COLUMN IF NOT EXISTS max_context_docs INTEGER DEFAULT 5",
+                # Orchestration — routing logs
+                """CREATE TABLE IF NOT EXISTS agent_routing_logs (
+                    id SERIAL PRIMARY KEY,
+                    query TEXT NOT NULL,
+                    primary_domain VARCHAR(50),
+                    secondary_domains JSONB DEFAULT '[]',
+                    routed_agent_id INTEGER REFERENCES agents(id),
+                    routing_confidence FLOAT DEFAULT 0.0,
+                    domain_scores JSONB DEFAULT '{}',
+                    matched_signals JSONB DEFAULT '[]',
+                    retrieval_confidence VARCHAR(10),
+                    results_count INTEGER DEFAULT 0,
+                    session_id VARCHAR(100),
+                    created_at TIMESTAMP DEFAULT NOW()
+                )""",
+                # Orchestration — knowledge gaps (continuous learning)
+                """CREATE TABLE IF NOT EXISTS knowledge_gaps (
+                    id SERIAL PRIMARY KEY,
+                    query TEXT NOT NULL,
+                    attempted_domain VARCHAR(50),
+                    retrieval_confidence VARCHAR(10),
+                    top_score FLOAT DEFAULT 0.0,
+                    suggested_domain VARCHAR(50),
+                    suggested_action TEXT,
+                    is_resolved BOOLEAN DEFAULT FALSE,
+                    resolved_by INTEGER REFERENCES users(id),
+                    resolved_at TIMESTAMP,
+                    occurrence_count INTEGER DEFAULT 1,
+                    last_asked_at TIMESTAMP DEFAULT NOW(),
+                    created_at TIMESTAMP DEFAULT NOW()
+                )""",
+                # Orchestration — agent handoffs
+                """CREATE TABLE IF NOT EXISTS agent_handoffs (
+                    id SERIAL PRIMARY KEY,
+                    query TEXT NOT NULL,
+                    from_agent_id INTEGER REFERENCES agents(id),
+                    to_agent_id INTEGER REFERENCES agents(id),
+                    reason TEXT,
+                    context JSONB DEFAULT '{}',
+                    status VARCHAR(30) DEFAULT 'pending',
+                    result TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    completed_at TIMESTAMP
+                )""",
+                # API Keys table
+                """CREATE TABLE IF NOT EXISTS api_keys (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL,
+                    key_hash VARCHAR(128) UNIQUE NOT NULL,
+                    key_prefix VARCHAR(12) NOT NULL,
+                    permissions JSONB DEFAULT '[]',
+                    is_active BOOLEAN DEFAULT TRUE,
+                    description TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    last_used_at TIMESTAMP,
+                    expires_at TIMESTAMP
+                )""",
+                # ══════════════════════════════════════════════════════
+                # YouTube Integration
+                # ══════════════════════════════════════════════════════
+                """CREATE TABLE IF NOT EXISTS youtube_channels (
+                    id BIGSERIAL PRIMARY KEY,
+                    youtube_id VARCHAR(64) UNIQUE NOT NULL,
+                    title VARCHAR(500),
+                    description TEXT,
+                    subscriber_count BIGINT DEFAULT 0,
+                    video_count INTEGER DEFAULT 0,
+                    view_count BIGINT DEFAULT 0,
+                    country VARCHAR(10),
+                    published_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )""",
+                """CREATE TABLE IF NOT EXISTS youtube_videos (
+                    id BIGSERIAL PRIMARY KEY,
+                    youtube_id VARCHAR(64) UNIQUE NOT NULL,
+                    channel_id BIGINT REFERENCES youtube_channels(id) ON DELETE CASCADE,
+                    title VARCHAR(500) NOT NULL,
+                    description TEXT,
+                    published_at TIMESTAMP,
+                    duration_sec INTEGER,
+                    category_id VARCHAR(20),
+                    tags TEXT[],
+                    thumbnail_url VARCHAR(500),
+                    query_source VARCHAR(255),
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )""",
+                """CREATE TABLE IF NOT EXISTS video_snapshots (
+                    id BIGSERIAL PRIMARY KEY,
+                    video_id BIGINT REFERENCES youtube_videos(id) ON DELETE CASCADE,
+                    view_count BIGINT DEFAULT 0,
+                    like_count BIGINT DEFAULT 0,
+                    comment_count BIGINT DEFAULT 0,
+                    captured_at TIMESTAMP DEFAULT NOW()
+                )""",
+                "CREATE INDEX IF NOT EXISTS ix_youtube_channels_youtube_id ON youtube_channels(youtube_id)",
+                "CREATE INDEX IF NOT EXISTS ix_youtube_videos_youtube_id ON youtube_videos(youtube_id)",
+                "CREATE INDEX IF NOT EXISTS ix_youtube_videos_channel_published ON youtube_videos(channel_id, published_at)",
+                "CREATE INDEX IF NOT EXISTS ix_youtube_videos_query_source ON youtube_videos(query_source)",
+                "CREATE INDEX IF NOT EXISTS ix_video_snapshots_video_captured ON video_snapshots(video_id, captured_at)",
+            ]
+            with engine.connect() as conn:
+                for sql in migrations:
+                    try:
+                        conn.execute(text(sql))
+                    except Exception:
+                        pass
+                conn.commit()
+            db = SessionLocal()
+            try:
+                from app.domains.auth.service import ensure_superuser
+                ensure_superuser(db)
+                # Validate stored Telegram session on startup
+                try:
+                    from app.domains.telegram.service import validate_and_refresh_session
+                    validate_and_refresh_session(db)
+                except Exception as tg_err:
+                    print(f"Telegram session check skipped: {tg_err}")
+            finally:
+                db.close()
+        except Exception as e:
+            print(f"DB init warning: {e}")
+    threading.Thread(target=init_db, daemon=True).start()
+
+    # ── Auto-sync Telegram messages every 60 seconds ──────────────────────
+    import time
+    def telegram_auto_sync():
+        # Wait for DB to be ready first
+        time.sleep(15)
+        while True:
+            try:
+                from app.domains.telegram.models import TelegramAccount, TelegramConnectionStatus
+                from app.domains.telegram.service import sync_messages, analyze_pending
+                db = SessionLocal()
+                try:
+                    account = db.query(TelegramAccount).filter_by(
+                        status=TelegramConnectionStatus.CONNECTED
+                    ).first()
+                    if account:
+                        new_count = sync_messages(db, account)
+                        if new_count > 0:
+                            analyze_pending(db, account)
+                            print(f"[AutoSync] استُقبلت {new_count} رسالة جديدة وتم تحليلها تلقائياً")
+                except Exception as sync_err:
+                    print(f"[AutoSync] خطأ: {sync_err}")
+                finally:
+                    db.close()
+            except Exception as outer_err:
+                print(f"[AutoSync] خطأ خارجي: {outer_err}")
+            time.sleep(60)
+
+    threading.Thread(target=telegram_auto_sync, daemon=True).start()
+
+    # ── Auto-collect YouTube data every 30 minutes ────────────────────────
+    def _youtube_collector_thread():
+        """
+        Thread target — يشغّل حلقة الجمع الدورية لـ YouTube.
+        - ينتظر 45 ثانية حتى تجهز قاعدة البيانات
+        - يتحقق من YOUTUBE_API_KEY و YOUTUBE_TRACKED_QUERIES قبل البدء
+        - يستورد الحلقة من app.domains.youtube.services.collector
+        """
+        import time as _time
+        _time.sleep(45)
+
+        if not getattr(settings, "YOUTUBE_API_KEY", None):
+            print("[YouTubeCollector] ⚠️  YOUTUBE_API_KEY غير مُعرَّف — تجاهل الجمع التلقائي")
+            return
+
+        queries = getattr(settings, "YOUTUBE_TRACKED_QUERIES", []) or []
+        if not queries:
+            print("[YouTubeCollector] ⚠️  YOUTUBE_TRACKED_QUERIES فارغ — لن يجمع أي بيانات")
+            print("[YouTubeCollector]    أضِف القائمة في Render → Environment")
+            return
+
+        print(f"[YouTubeCollector] {len(queries)} queries configured: {queries}")
+
+        try:
+            from app.domains.youtube.services.collector import (
+                youtube_auto_collect as _loop,
+            )
+            interval_min = getattr(settings, "YOUTUBE_COLLECT_INTERVAL_MINUTES", 30)
+            _loop(
+                interval_sec=interval_min * 60,
+                initial_delay=interval_min * 60,   # ← أول دورة بعد 30 دقيقة
+            )
+        except ImportError as e:
+            print(f"[YouTubeCollector] ❌ ImportError: {e}")
+            print(f"[YouTubeCollector]    تأكد من وجود app/domains/youtube/services/collector.py")
+        except Exception as e:
+            print(f"[YouTubeCollector] ❌ fatal: {e}")
+
+    threading.Thread(target=_youtube_collector_thread, daemon=True).start()
+    print(f"[Startup] YouTube collector thread scheduled (30 min interval)")
+
+    # ── Keep-Alive Ping (prevents Render / free-tier sleep) ───────────────
+    def _detect_app_url() -> str:
+        """Auto-detect the public app URL from common hosting platforms."""
+        import os as _os
+        import socket
+
+        candidates = [
+            _os.environ.get("RENDER_EXTERNAL_URL"),        # Render (auto)
+            _os.environ.get("REPLIT_DEV_DOMAIN") and
+                f"https://{_os.environ['REPLIT_DEV_DOMAIN']}",  # Replit (auto)
+            _os.environ.get("RAILWAY_PUBLIC_DOMAIN") and
+                f"https://{_os.environ['RAILWAY_PUBLIC_DOMAIN']}",  # Railway (auto)
+            _os.environ.get("FLY_APP_NAME") and
+                f"https://{_os.environ['FLY_APP_NAME']}.fly.dev",  # Fly.io (auto)
+            _os.environ.get("APP_URL"),                    # manual override
+        ]
+
+        for url in candidates:
+            if url:
+                return url.rstrip("/")
+
+        # Last resort: local
+        return "http://localhost:5000"
+
+    def keep_alive():
+        """Ping own /health every 7 min so free-tier hosts never spin down.
+        Also checks DB connectivity on each cycle and updates _keepalive_state['db_ok'].
+        """
+        import urllib.request
+
+        time.sleep(20)
+        url = _detect_app_url() + "/health"
+        _keepalive_state["url"] = url
+        print(f"[KeepAlive] جاهز — سيُرسَل ping كل 7 دقائق إلى: {url}")
+
+        while True:
+            now = datetime.utcnow()
+            entry: dict = {"time": now.isoformat(), "ok": False, "status": None}
+
+            # ── HTTP ping ─────────────────────────────────────────────
+            try:
+                with urllib.request.urlopen(url, timeout=15) as resp:
+                    entry["ok"] = True
+                    entry["status"] = resp.status
+                    _keepalive_state["ping_count"] += 1
+                    _keepalive_state["last_ping"] = now.isoformat()
+                    _keepalive_state["last_status"] = resp.status
+                    print(f"[KeepAlive] ✓ HTTP {resp.status} — {url}")
+            except Exception as e:
+                entry["error"] = str(e)
+                _keepalive_state["fail_count"] += 1
+                print(f"[KeepAlive] ✗ HTTP فشل: {e}")
+
+            # ── DB ping ───────────────────────────────────────────────
+            try:
+                from app.core.database import engine as _engine
+                from sqlalchemy import text as _stext
+                with _engine.connect() as _conn:
+                    _conn.execute(_stext("SELECT 1"))
+                _keepalive_state["db_ok"] = True
+            except Exception as _dbe:
+                _keepalive_state["db_ok"] = False
+                print(f"[KeepAlive] ✗ DB فشل: {_dbe}")
+
+            hist = _keepalive_state["history"]
+            hist.append(entry)
+            if len(hist) > 10:
+                hist.pop(0)
+            time.sleep(7 * 60)
+
+    threading.Thread(target=keep_alive, daemon=True).start()
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "version": settings.VERSION, "project": settings.PROJECT_NAME}
+
+
+@app.get("/api/v1/system/keepalive-status")
+def keepalive_status():
+    """Current keepalive state + seconds until next ping. No auth — read-only metrics."""
+    now = datetime.utcnow()
+    uptime_secs = int((now - _SERVER_START).total_seconds())
+    hours, rem   = divmod(uptime_secs, 3600)
+    minutes, sec = divmod(rem, 60)
+    return {
+        "server_ok":    True,
+        "uptime":       f"{hours}س {minutes}د {sec}ث",
+        "uptime_secs":  uptime_secs,
+        "ping_count":   _keepalive_state["ping_count"],
+        "fail_count":   _keepalive_state["fail_count"],
+        "last_ping":    _keepalive_state["last_ping"],
+        "last_status":  _keepalive_state["last_status"],
+        "db_ok":        _keepalive_state["db_ok"],
+        "next_ping_in": _calc_next_ping_in(),
+        "interval":     420,
+        "history":      _keepalive_state["history"][-5:],
+        "url":          _keepalive_state["url"],
+        "timestamp":    now.isoformat(),
+    }
+
+
+@app.get("/api/v1/system/events")
+async def system_events(request: Request):
+    """
+    Server-Sent Events stream — pushes real-time health updates to the dashboard.
+
+    Event types:
+      heartbeat  — every 15 s, keeps the connection alive
+      status     — every 30 s, full state snapshot (used to refresh the widget)
+      alert      — immediately when a ping fails OR DB goes down
+      recover    — immediately when ping succeeds after failures / DB recovers
+    """
+    import asyncio, json as _json
+
+    async def _generator():
+        import asyncio
+        prev_fail  = _keepalive_state["fail_count"]
+        prev_ping  = _keepalive_state["ping_count"]
+        prev_db_ok = _keepalive_state["db_ok"]
+        tick = 0                    # increments every 15 s
+
+        while True:
+            if await request.is_disconnected():
+                break
+
+            now         = datetime.utcnow()
+            uptime_secs = int((now - _SERVER_START).total_seconds())
+            hours, rem  = divmod(uptime_secs, 3600)
+            mins, secs  = divmod(rem, 60)
+
+            cur_fail   = _keepalive_state["fail_count"]
+            cur_ping   = _keepalive_state["ping_count"]
+            cur_db_ok  = _keepalive_state["db_ok"]
+
+            # ── Determine event type ────────────────────────────────
+            event_type = "heartbeat"
+            data: dict = {}
+
+            # New failure?
+            if cur_fail > prev_fail:
+                event_type = "alert"
+                data = {
+                    "kind":       "ping_failed",
+                    "message":    "⚠️ فشل اتصال التنشيط — قد يكون السيرفر في خطر",
+                    "fail_count": cur_fail,
+                    "timestamp":  now.isoformat(),
+                }
+                prev_fail = cur_fail
+
+            # DB just went down?
+            elif prev_db_ok is True and cur_db_ok is False:
+                event_type = "alert"
+                data = {
+                    "kind":      "db_down",
+                    "message":   "🔴 قاعدة البيانات غير متاحة",
+                    "timestamp": now.isoformat(),
+                }
+
+            # Recovery: new successful ping after failures
+            elif cur_ping > prev_ping and prev_fail > 0:
+                event_type = "recover"
+                data = {
+                    "kind":       "ping_ok",
+                    "message":    "✅ عاد الاتصال بنجاح",
+                    "ping_count": cur_ping,
+                    "timestamp":  now.isoformat(),
+                }
+                prev_ping = cur_ping
+
+            # DB recovered?
+            elif prev_db_ok is False and cur_db_ok is True:
+                event_type = "recover"
+                data = {
+                    "kind":      "db_up",
+                    "message":   "✅ قاعدة البيانات عادت للعمل",
+                    "timestamp": now.isoformat(),
+                }
+
+            # Every 30 s (2 ticks): full status snapshot
+            elif tick % 2 == 0:
+                event_type = "status"
+                data = {
+                    "ping_count":   cur_ping,
+                    "fail_count":   cur_fail,
+                    "db_ok":        cur_db_ok,
+                    "last_ping":    _keepalive_state["last_ping"],
+                    "last_status":  _keepalive_state["last_status"],
+                    "next_ping_in": _calc_next_ping_in(),
+                    "uptime":       f"{hours}س {mins}د {secs}ث",
+                    "history":      _keepalive_state["history"][-5:],
+                }
+                prev_ping = cur_ping
+                prev_db_ok = cur_db_ok
+
+            yield f"event: {event_type}\ndata: {_json.dumps(data, ensure_ascii=False)}\n\n"
+            tick += 1
+            await asyncio.sleep(15)
+
+    return __import__("fastapi").responses.StreamingResponse(
+        _generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control":    "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection":       "keep-alive",
+        },
+    )
+
+
+@app.get("/status")
+def status_page(request: Request):
+    """Public server status dashboard — no auth required."""
+    from fastapi.responses import HTMLResponse
+    from fastapi.templating import Jinja2Templates
+    import platform
+
+    templates_dir = os.path.join(os.path.dirname(__file__), "templates")
+    tpl = Jinja2Templates(directory=templates_dir)
+
+    now = datetime.utcnow()
+    uptime_secs = int((now - _SERVER_START).total_seconds())
+    hours, rem   = divmod(uptime_secs, 3600)
+    minutes, sec = divmod(rem, 60)
+    uptime_str   = f"{hours}س {minutes}د {sec}ث"
+
+    # Quick DB check
+    db_ok = False
+    try:
+        from app.core.database import engine as _engine
+        from sqlalchemy import text as _text
+        with _engine.connect() as conn:
+            conn.execute(_text("SELECT 1"))
+        db_ok = True
+    except Exception:
+        pass
+
+    context = {
+        "request":      request,
+        "start_time":   _SERVER_START.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "uptime":       uptime_str,
+        "uptime_secs":  uptime_secs,
+        "python":       platform.python_version(),
+        "platform_info": platform.system() + " " + platform.release(),
+        "db_ok":        db_ok,
+        "ka":           _keepalive_state,
+        "version":      settings.VERSION,
+        "project":      settings.PROJECT_NAME,
+    }
+    return tpl.TemplateResponse("status.html", context)
